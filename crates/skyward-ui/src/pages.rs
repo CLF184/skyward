@@ -563,7 +563,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     y = widgets::info_card(&mut c, t, f, y + gap, &[
         (l.pick(["Recovery 版本", "Recovery 版本", "Recovery version"]), format!("Skyward {VERSION}")),
         (l.pick(["内核版本", "核心版本", "Kernel version"]), i.kernel.clone()),
-        (l.pick(["构建人", "構建人", "Built by"]), BUILT_BY.to_string()),
+        (l.pick(["构建 by", "構建 by", "Built by"]), BUILT_BY.to_string()),
     ]);
 
     let mut boot = Vec::new();
