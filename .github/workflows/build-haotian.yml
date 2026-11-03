@@ -1,0 +1,109 @@
+name: Build haotian
+
+# The recovery for the Xiaomi 15 Pro alone: run it by hand from the Actions
+# tab, or push to any branch to have it built. The image lands in the run's
+# artifacts as a zip, named for the build and the stock version it is made on.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "crates/**"
+      - "devices/haotian.toml"
+      - "resources/fonts/**"
+      - ".github/workflows/build-haotian.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DEVICE: haotian
+
+jobs:
+  build:
+    name: Build the recovery
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain rust-toolchain.toml names, the NDK and cargo-ndk, set
+      # up as the repository's own action does it.
+      - uses: ./.github/actions/setup
+
+      # Two targets are built: the recovery service for the phone, and the
+      # packer, which runs here and puts the service into the stock image.
+      # The setup action left ANDROID_NDK_HOME set for cargo-ndk.
+      - name: Build the recovery service for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+
+      - name: Build the packer
+        run: cargo build --locked --release -p skyward-pack
+
+      # The packer says which stock build the recovery is made on, and reads
+      # that build's recovery partition out of the full update package on the
+      # phone maker's server. Only the part of the package the partition is in
+      # is read, not the several gigabytes in all.
+      - name: Read the stock build the recovery is made on
+        id: stock
+        run: target/release/skyward-pack stock --config "devices/$DEVICE.toml" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the stock recovery
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: stock/recovery.img
+          key: stock-recovery-${{ env.DEVICE }}-${{ steps.stock.outputs.recovery }}
+
+      - name: Take the recovery partition out of the stock package
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: target/release/skyward-pack stock --config "devices/$DEVICE.toml" --out stock/recovery.img
+
+      - name: Check the stock recovery
+        env:
+          RECOVERY: ${{ steps.stock.outputs.recovery }}
+        run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+
+      # The image is named for the build, the phone and the stock version it
+      # is made on, as the releases name theirs; on a tag that is the tag.
+      - name: Pack the recovery
+        id: pack
+        env:
+          STOCK: ${{ steps.stock.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
+          name="skyward-$version-$DEVICE-$STOCK"
+          mkdir out
+          target/release/skyward-pack recovery \
+            --stock stock/recovery.img \
+            --binary target/aarch64-linux-android/release/skyward \
+            --config "devices/$DEVICE.toml" \
+            --font resources/fonts/MiSansVF.ttf \
+            --mono resources/fonts/KirkMono-Regular.ttf \
+            --mono-license resources/fonts/KirkMono-OFL.txt \
+            --out "out/$name.img"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # The image is the whole partition, flashed as it is, and most of it is
+      # the room the recovery leaves empty; it is handed out zipped.
+      - name: Zip the image
+        working-directory: out
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+        run: zip -9 "$NAME.zip" "$NAME.img"
+
+      # The artifact takes the zip's name and is not packed again, so what is
+      # downloaded is the image's own zip, as the releases hand it out.
+      - uses: actions/upload-artifact@v4
+        with:
+          path: out/${{ steps.pack.outputs.name }}.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
