@@ -98,7 +98,21 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let top = normal_max(read("max_brightness")?)?;
+        let max = read("max_brightness")?;
+        // The panel's normal maximum is read from the node the display
+        // driver booted with, which not every panel gives the same way. A
+        // panel whose node says it as none of them still shows the pages,
+        // at the whole of the backlight's range, and the reason goes to the
+        // kernel log rather than ending the recovery.
+        let top = match normal_max(max) {
+            Ok(top) => top,
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!(
+                    "the panel's normal maximum brightness is not known, so the backlight's own maximum is used: {e:#}"
+                ));
+                max
+            }
+        };
         let level = read("brightness")?;
         Ok(Backlight { path: dir.join("brightness"), top, level })
     }
@@ -1028,8 +1042,24 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
-    let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
-    let mut backlight = Backlight::open()?;
+    // Neither the motor nor the backlight is what shows the pages: a phone
+    // whose motor driver is not loaded, or whose panel backlight is not
+    // reached where the phone's own driver keeps it, still works, and why
+    // one is not used goes to the kernel log.
+    let mut haptics = match cfg.haptics.as_ref().map(Haptics::open).transpose() {
+        Ok(haptics) => haptics,
+        Err(e) => {
+            let _ = skyward_sys::kmsg(&format!("the motor is not used: {e:#}"));
+            None
+        }
+    };
+    let mut backlight = match Backlight::open() {
+        Ok(backlight) => Some(backlight),
+        Err(e) => {
+            let _ = skyward_sys::kmsg(&format!("the panel's backlight is not reached: {e:#}"));
+            None
+        }
+    };
     let first = match &request.work {
         Work::Fastboot => Screen::Fastboot,
         Work::PromptWipeData => Screen::CantStart,
@@ -1334,10 +1364,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // After the frame is on the panel, so a panel coming back on lights
         // with what it should show now, never with what it showed when it
         // went off.
-        if backlight.level == 0 && panel.is_some() {
+        if backlight.as_ref().is_some_and(|b| b.level == 0) && panel.is_some() {
             surface.settle()?;
         }
-        backlight.show(panel)?;
+        // The pages are what this loop is for; a panel whose backlight
+        // cannot be written still shows them, and why it could not goes to
+        // the kernel log once rather than ending the recovery.
+        let lit = match backlight.as_mut() {
+            Some(b) => b.show(panel).map_err(|e| format!("{e:#}")),
+            None => Ok(()),
+        };
+        if let Err(e) = lit {
+            let _ = skyward_sys::kmsg(&format!("the panel's backlight is not set: {e}"));
+            backlight = None;
+        }
         // A page at rest draws the rows it has yet to while nothing else
         // is to be done, a band at a time, looking for input between bands.
         let ahead = panel.is_some() && !shown && app.draw_ahead(&fonts, &info);

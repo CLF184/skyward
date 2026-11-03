@@ -162,7 +162,9 @@ recovery = "675c3755a00c993ad706550d79377e906abe2547f423f29ced2fb3587d170bd8"
 # qcom-hv-haptics (qcom,hv-haptics in its dtbo), whose driver says the
 # motor's resonant frequency as the 17 Ultra's does; the click is made from
 # samples at that frequency, and the strengths are the 17 Ultra's. Neither
-# is yet tried on this phone's motor.
+# is yet tried on this phone's motor. A phone whose motor this driver does
+# not bring up keeps working: the pages run without a click, and why the
+# motor was left out goes to the kernel log.
 [haptics]
 resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
 strength = { lightest = 0.25, strongest = 0.75 }
