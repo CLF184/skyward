@@ -204,6 +204,16 @@ pub struct Haptics {
     /// from samples.
     #[serde(default)]
     pub resonance: Option<String>,
+    /// The kernel modules the motor's driver is in, which the recovery loads
+    /// as it brings the motor up: a motor whose driver the phone's own
+    /// recovery leaves out makes no force-feedback device until it is.
+    #[serde(default)]
+    pub modules: Vec<String>,
+    /// Firmware files the driver asks the kernel's loader for, which the
+    /// phone's own recovery keeps out of its reach: a motor driver that ends
+    /// its probe for want of one makes no force-feedback device either.
+    #[serde(default)]
+    pub firmware: Vec<Firmware>,
     pub strength: Strength,
 }
 
@@ -518,8 +528,12 @@ impl DeviceConfig {
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
         if let Some(haptics) = &cfg.haptics {
+            // A click is of one kind or the other, and a driver that keeps
+            // neither — Cirrus Logic's CS40L26 plays what it is handed and
+            // says its motor's frequency nowhere — names neither and takes a
+            // click made for the frequency these motors swing at.
             ensure!(
-                haptics.click.is_some() != haptics.resonance.is_some(),
+                !(haptics.click.is_some() && haptics.resonance.is_some()),
                 "[haptics] names either a waveform the driver keeps or the file it says the motor's resonant frequency in"
             );
             if let Some(file) = &haptics.resonance {
@@ -530,6 +544,23 @@ impl DeviceConfig {
                 0.0 < lightest && lightest < strongest && strongest <= 1.0,
                 "[haptics] strength: {lightest} and {strongest} are not shares rising from above 0 to at most 1"
             );
+            for name in &haptics.modules {
+                ensure!(!name.is_empty() && !name.contains('/') && !name.ends_with(".ko"), "[haptics] modules: {name} is not a module's name");
+            }
+            for file in &haptics.firmware {
+                ensure!(
+                    !file.name.is_empty() && !file.name.starts_with('/') && !file.name.contains(".."),
+                    "[haptics] firmware: {} is not a name from the loader's folders",
+                    file.name
+                );
+                ensure!(!file.path.is_empty(), "[haptics] firmware: {} names no file", file.name);
+                if let Some(partition) = &file.partition {
+                    ensure!(
+                        !partition.is_empty() && !partition.contains('/'),
+                        "[haptics] firmware: {partition} is not a partition's name"
+                    );
+                }
+            }
         }
         if let Some(logd) = &cfg.logd {
             for library in &logd.libraries {
@@ -627,7 +658,7 @@ mod tests {
         let strength = "strength = { lightest = 0.25, strongest = 1.0 }";
         assert!(with(&format!("click = 0\n{strength}")).is_ok());
         assert!(with(&format!("resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"\n{strength}")).is_ok());
-        assert!(with(strength).is_err(), "a click of neither kind");
+        assert!(with(strength).is_ok(), "a driver that keeps neither takes a made click at a nominal frequency");
         assert!(with(&format!("click = 0\nresonance = \"/sys/f\"\n{strength}")).is_err(), "a click of both kinds");
         assert!(with(&format!("resonance = \"sys/f\"\n{strength}")).is_err(), "a file named from nowhere");
         assert!(with("click = 0").is_err(), "a click without its strengths");
@@ -635,6 +666,24 @@ mod tests {
             let s = format!("click = 0\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
             assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
         }
+    }
+
+    #[test]
+    fn a_motor_names_its_drivers_modules_and_firmware_plainly() {
+        let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\n{body}\n"));
+        let strength = "strength = { lightest = 0.25, strongest = 1.0 }";
+        assert!(with(&format!("modules = [\"cs40l26-core\", \"cs40l26-i2c\"]\n{strength}")).is_ok());
+        assert!(with(&format!("firmware = [{{ name = \"cs40l26.wmfw\", path = \"/odm/firmware/o8/cs40l26.wmfw\" }}]\n{strength}")).is_ok());
+        assert!(with(&format!("firmware = [{{ name = \"cs40l26.wmfw\", partition = \"odm\", path = \"firmware/o8/cs40l26.wmfw\" }}]\n{strength}")).is_ok());
+        for bad in ["\"cs40l26-core.ko\"", "\"/lib/modules/x\"", "\"\""] {
+            assert!(with(&format!("modules = [{bad}]\n{strength}")).is_err(), "module {bad} is refused");
+        }
+        for bad in ["\"/cs40l26.wmfw\"", "\"../x.wmfw\"", "\"\""] {
+            let body = format!("firmware = [{{ name = {bad}, path = \"/x\" }}]\n{strength}");
+            assert!(with(&body).is_err(), "firmware name {bad} is refused");
+        }
+        let bad = format!("firmware = [{{ name = \"a.wmfw\", partition = \"by-name/odm\", path = \"a\" }}]\n{strength}");
+        assert!(with(&bad).is_err(), "a partition named by a path is refused");
     }
 
     #[test]

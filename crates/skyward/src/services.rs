@@ -41,8 +41,14 @@ const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
     for s in services {
+        // A program this build of the phone does not carry is left out
+        // rather than ending the rest: the configuration is written for the
+        // phone, and what it names need not all be there. The key service
+        // and the boot control are what the data partition and the slots
+        // wait for, and neither is worth losing to a program that is not.
         if !Path::new(&s.path).is_file() {
-            bail!("{} is missing; is its partition mounted?", s.path);
+            skyward_sys::kmsg(&format!("{} is missing; it is not started", s.path))?;
+            continue;
         }
         let mut s = s.clone();
         if let Some(dir) = libraries {
@@ -58,7 +64,13 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
         thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
-        ready(&waiting)?;
+        // A program that does not become what it says it will be holds up
+        // the pages no longer: it is said in the kernel log and the next
+        // program starts. One that registers later is still found by what
+        // looks for it.
+        if let Err(e) = ready(&waiting) {
+            skyward_sys::kmsg(&format!("{e:#}"))?;
+        }
     }
     Ok(())
 }

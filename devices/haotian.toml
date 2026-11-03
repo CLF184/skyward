@@ -159,14 +159,20 @@ server = "https://update.miui.com/updates/miotaV3.php"
 version = "OS3.0.309.0.WOBCNXM"
 package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.309.0.WOBCNXM/haotian-ota_full-OS3.0.309.0.WOBCNXM-user-16.0-f9387d12d7.zip"
 recovery = "675c3755a00c993ad706550d79377e906abe2547f423f29ced2fb3587d170bd8"
-# qcom-hv-haptics (qcom,hv-haptics in its dtbo), whose driver says the
-# motor's resonant frequency as the 17 Ultra's does; the click is made from
-# samples at that frequency, and the strengths are the 17 Ultra's. Neither
-# is yet tried on this phone's motor. A phone whose motor this driver does
-# not bring up keeps working: the pages run without a click, and why the
-# motor was left out goes to the kernel log.
+# This phone's motor is not the one qcom-hv-haptics drives: it is Cirrus
+# Logic's CS40L26 on i2c 0-0043, whose driver the phone's own init loads as
+# cs40l26-core, cs40l26-i2c and snd-soc-cs40l26. Its probe reads
+# cs40l26.wmfw through the kernel's loader, and ends with error -2 when the
+# file is not there, so no force-feedback device appears until it is. The
+# firmware is on the odm partition, under the folder the kernel's own
+# firmware_class.path names in its command line.
+#
+# The chip says its motor's resonant frequency nowhere, so no file is named
+# for it: the click is made at the frequency these linear motors swing at,
+# and the strengths are the 17 Ultra's.
 [haptics]
-resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
+modules = ["cs40l26-core", "cs40l26-i2c"]
+firmware = [{ name = "cs40l26.wmfw", path = "/odm/firmware/o8/cs40l26.wmfw" }]
 strength = { lightest = 0.25, strongest = 0.75 }
 
 # The recovery's own logd loads libsysutils and libcap, which the stock

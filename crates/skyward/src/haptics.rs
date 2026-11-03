@@ -18,6 +18,11 @@ const FF_CUSTOM: u16 = 0x5d;
 /// takes: some fifty samples to each swing of the motor.
 const RATE: u32 = 8000;
 
+/// What a motor swings at when its driver says the frequency nowhere: the
+/// one the 17 Ultra's motor has, and the usual one of the linear motors
+/// these phones carry.
+const NOMINAL_HZ: f32 = 172.4;
+
 /// A made click: swings of the motor at its resonant frequency that drive
 /// it, then swings turned over that stop it, so that it does not ring on.
 const DRIVE_SWINGS: f32 = 2.0;
@@ -60,7 +65,17 @@ impl Haptics {
                 Click::Kept(id)
             }
             (None, Some(file)) => {
-                let hz = resonance(file)?;
+                // A driver that says its motor's frequency nowhere, as
+                // Cirrus Logic's CS40L26 does not, still takes a click made
+                // for the frequency these motors swing at; the reason goes
+                // to the log and the motor is not left out over it.
+                let hz = match resonance(file) {
+                    Ok(hz) => hz,
+                    Err(e) => {
+                        let _ = skyward_sys::kmsg(&format!("the motor's resonant frequency is not read, so {} Hz is used: {e:#}", NOMINAL_HZ));
+                        NOMINAL_HZ
+                    }
+                };
                 eprintln!("haptics {}: clicks made for a motor swinging at {hz} Hz", path.display());
                 Click::Made(made(hz))
             }
@@ -110,6 +125,76 @@ pub fn probe(cfg: &skyward_config::Haptics, position: f32) -> Result<()> {
     Ok(())
 }
 
+/// Bring the motor's driver up: put the firmware it asks the kernel's loader
+/// for where the loader looks, then load the modules it is in. A driver the
+/// phone's own init loaded already has spent its probe on the empty folder
+/// its recovery leaves; putting the firmware there does not try it again, so
+/// the device is unbound from its driver and bound back to it, which probes
+/// it afresh with the file now in place.
+pub fn bring_up(cfg: &skyward_config::Haptics, sources: &[String]) -> Result<()> {
+    for file in &cfg.firmware {
+        crate::wlan::place_firmware(file)?;
+    }
+    if !cfg.modules.is_empty() {
+        let dirs = sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+        for path in skyward_modules::load(&dirs, &cfg.modules)? {
+            skyward_sys::kmsg(&format!("loaded {} for the motor", path.display()))?;
+        }
+    }
+    // Only a driver that asked for firmware and went without it has to be
+    // prodded; one that probed cleanly made its device already.
+    if !cfg.firmware.is_empty() && !any_motor() {
+        reprobe(cfg)?;
+    }
+    Ok(())
+}
+
+/// Unbind each of the configured drivers from its device and bind it back,
+/// so the driver probes the motor again now its firmware is where the loader
+/// looks. The drivers are found by the names the kernel gives them under
+/// /sys/bus/i2c/drivers, which drop the suffix a module's file name carries:
+/// cs40l26-i2c is the driver cs40l26.
+fn reprobe(cfg: &skyward_config::Haptics) -> Result<()> {
+    for module in &cfg.modules {
+        let driver = driver_name(module);
+        let at = Path::new("/sys/bus/i2c/drivers").join(&driver);
+        let Ok(listing) = fs::read_dir(&at) else { continue };
+        let bound: Vec<_> = listing.flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().contains('-')).collect();
+        for name in &bound {
+            let name = name.to_string_lossy();
+            let _ = fs::write(at.join("unbind"), name.as_ref());
+            let _ = fs::write(at.join("bind"), name.as_ref());
+            skyward_sys::kmsg(&format!("bound {driver} to {name} again so it probes the motor with its firmware"))?;
+        }
+    }
+    // The device node and its force-feedback device appear as the probe
+    // runs, which is not synchronous with the write above.
+    let until = std::time::Instant::now() + PROBE_WAIT;
+    while std::time::Instant::now() < until {
+        if any_motor() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+/// The kernel's name for the driver a module is in: the module's own name
+/// without the bus it sits on, as cs40l26-i2c is the driver cs40l26 and
+/// cs40l26-core is none.
+fn driver_name(module: &str) -> String {
+    module.trim_end_matches("-core").trim_end_matches("-i2c").replace('_', "-")
+}
+
+/// Whether any input device takes periodic force-feedback effects yet.
+fn any_motor() -> bool {
+    evdev::raw_stream::enumerate().any(|(_, dev)| takes_periodic(&dev))
+}
+
+/// How long a driver may take to make its force-feedback device once bound
+/// to the motor again.
+const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The first input device under /dev/input that takes periodic
 /// force-feedback effects, opened for writing.
 fn motor() -> Result<(PathBuf, File)> {
@@ -132,7 +217,9 @@ fn share(strength: &Strength, position: f32) -> f32 {
 }
 
 /// The motor's resonant frequency in hertz, from the file the driver says
-/// it in, in tenths of a hertz.
+/// it in, in tenths of a hertz. A driver that says it nowhere, as Cirrus
+/// Logic's CS40L26 does not, still takes a click made for a frequency near
+/// the one these motors swing at.
 fn resonance(file: &str) -> Result<f32> {
     let text = fs::read_to_string(file).with_context(|| format!("read {file}"))?;
     let tenths: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;

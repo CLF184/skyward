@@ -238,7 +238,18 @@ pub fn publish_descriptions(wanted: &[String], files: &[String]) -> Result<usize
     }
     for file in files {
         let from = Path::new(file);
-        take(from, &fs::read_to_string(from).with_context(|| format!("read {file}"))?)?;
+        // The configuration names a description for each service it lists,
+        // and a phone's build need not carry every one of them: a missing
+        // file is left out rather than failing the whole set, which would
+        // leave even the services whose descriptions are there unknown to
+        // the directory.
+        match fs::read_to_string(from) {
+            Ok(text) => take(from, &text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("no description at {file}; the service it belongs to goes without")
+            }
+            Err(e) => return Err(e).with_context(|| format!("read {file}")),
+        }
     }
     let rewritten = say_framework(into)?;
     if copied > 0 || rewritten > 0 {
