@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -102,19 +103,20 @@ static LISTENERS: OnceLock<Mutex<HashMap<String, Listening>>> = OnceLock::new();
 fn listeners(s: &Service, known: &HashMap<String, u32>) -> Result<Vec<Listening>> {
     let kept = LISTENERS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut kept = kept.lock().expect("no panic while holding the service sockets");
-    s.sockets.iter().map(|socket| {
-        if !kept.contains_key(&socket.name) {
-            let listening = listen(socket, known)?;
-            kept.insert(socket.name.clone(), listening);
-        }
-        let socket = &kept[&socket.name];
-        let fd = unsafe { libc::fcntl(socket.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 50) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error()).context("give the service its socket descriptor");
-        }
-        Ok(Listening { name: socket.name.clone(), fd: unsafe { OwnedFd::from_raw_fd(fd) } })
-    })
-    .collect()
+    s.sockets
+        .iter()
+        .map(|socket| {
+            if let std::collections::hash_map::Entry::Vacant(slot) = kept.entry(socket.name.clone()) {
+                slot.insert(listen(socket, known)?);
+            }
+            let socket = &kept[&socket.name];
+            let fd = unsafe { libc::fcntl(socket.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 50) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error()).context("give the service its socket descriptor");
+            }
+            Ok(Listening { name: socket.name.clone(), fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+        })
+        .collect()
 }
 
 /// Make one listening socket as the phone's init does.
@@ -264,7 +266,7 @@ fn ready(s: &Service) -> Result<()> {
     loop {
         // A program that has already died cannot become ready. Say so now
         // rather than waiting out twenty seconds for each dead service.
-        if let Some(pid) = running(&s.path) {
+        if running(&s.path).is_some() {
             lived = true;
         } else if lived || Instant::now() + READY_POLL >= until {
             bail!("{} has already ended, so it {waited_on}", s.path);
