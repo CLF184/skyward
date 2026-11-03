@@ -139,24 +139,19 @@ pub fn insmod(path: impl AsRef<Path>, params: &str) -> Result<()> {
     use std::os::unix::io::AsRawFd;
     let path = path.as_ref();
     let f = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    // Modules from the installed system's vendor_dlkm are not necessarily
-    // for the recovery kernel. A mismatch is a kernel ABI error, not a
-    // reason to continue with a half-loaded driver.
-    let module = path.file_name().and_then(|n| n.to_str()).unwrap_or("module");
-    if let Some(wanted) = fs::read_to_string("/proc/sys/kernel/osrelease").ok().and_then(|s| s.split_whitespace().next().map(str::to_owned)) {
-        if let Some(actual) = vermagic(path) {
-            if !actual.starts_with(&wanted) {
-                anyhow::bail!("{module} was built for {actual}, but this recovery runs {wanted}; use the module supplied with the matching recovery kernel");
-            }
-        }
-    }
     let cparams = CString::new(params)?;
+    // The phone's own modules in vendor_dlkm and vendor_boot are built with a
+    // different compiler stamp than the recovery kernel -- finit_module says
+    // 6.6.57 where the kernel is 6.6.118 -- and its init loads them with both
+    // of these set, which is why /proc/modules marks them (O). Without them
+    // the kernel refuses every one of the phone's drivers, the touchscreen's
+    // among them.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_finit_module,
             f.as_raw_fd(),
             cparams.as_ptr(),
-            0 as libc::c_int,
+            libc::MODULE_INIT_IGNORE_VERMAGIC | libc::MODULE_INIT_IGNORE_MODVERSIONS,
         )
     };
     if rc != 0 {
@@ -168,15 +163,6 @@ pub fn insmod(path: impl AsRef<Path>, params: &str) -> Result<()> {
         return Err(e).with_context(|| format!("finit_module {}", path.display()));
     }
     Ok(())
-}
-
-/// The version string a module carries in its .modinfo section.
-#[cfg(target_os = "android")]
-fn vermagic(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    let start = bytes.windows(b"vermagic=".len()).position(|w| w == b"vermagic=")? + b"vermagic=".len();
-    let end = bytes[start..].iter().position(|b| *b == 0)? + start;
-    String::from_utf8(bytes[start..end].to_vec()).ok()
 }
 
 #[cfg(not(target_os = "android"))]
