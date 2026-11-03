@@ -86,14 +86,20 @@ jobs:
           set -eu
           target/release/skyward-pack stock --config "devices/$DEVICE.toml" --out stock/recovery.img --partition odm
           mkdir -p extracted
+          mounted=no
           if sudo mount -o loop,ro -t erofs stock/odm.img extracted 2>/dev/null; then
-            cp extracted/firmware/cs40l26.wmfw stock/cs40l26.wmfw
-            sudo umount extracted
+            mounted=yes
           else
             echo "no erofs support in the kernel; reading it in userspace"
             fsck.erofs --extract=extracted --no-preserve --overwrite stock/odm.img
-            cp extracted/firmware/cs40l26.wmfw stock/cs40l26.wmfw
           fi
+          # The build names the file, not its folder: a stock build may keep it
+          # elsewhere, so find it instead of assuming firmware/.
+          found=$(find extracted -name cs40l26.wmfw -type f | head -n 1)
+          test -n "$found"
+          echo "took $found"
+          cp "$found" stock/cs40l26.wmfw
+          if [ "$mounted" = yes ]; then sudo umount extracted; fi
           # The partition is several gigabytes and its only use here was the
           # one file just taken from it.
           rm -rf extracted stock/odm.img

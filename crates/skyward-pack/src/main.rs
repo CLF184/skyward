@@ -65,9 +65,11 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
-        /// A firmware file to put where init's firmware loader finds it,
-        /// before its first driver probe: name=local-file, with name from the
-        /// loader's firmware directories, such as cs40l26.wmfw=/tmp/cs40l26.wmfw.
+        /// A firmware file to put where the kernel's own loader finds it
+        /// before its first driver probe: name=local-file. The phone's init
+        /// turns on the fallback to ueventd in early-init, before it loads
+        /// any module, and ueventd reads /etc/firmware, which is a symbolic
+        /// link to system/etc/firmware in the stock ramdisk.
         #[arg(long = "firmware")]
         firmware: Vec<String>,
         /// A module to put in the recovery's module directory, as
@@ -137,7 +139,7 @@ fn main() -> Result<()> {
             for file in firmware {
                 let (name, from) = file.split_once('=').with_context(|| "--firmware takes name=local-file")?;
                 ensure!(!name.is_empty() && !name.starts_with('/') && !name.contains(".."), "{name} is not a firmware name");
-                rd.add(&format!("etc/firmware/{name}"), 0o644, read(&PathBuf::from(from))?)?;
+                rd.add(&format!("system/etc/firmware/{name}"), 0o644, read(&PathBuf::from(from))?)?;
             }
             for file in modules {
                 let (name, from) = file.split_once('=').with_context(|| "--module takes name.ko=local-file")?;
