@@ -7,8 +7,6 @@ pub mod token;
 pub mod user;
 pub mod weaver;
 
-pub mod element;
-
 #[cfg(target_os = "android")]
 pub mod data;
 #[cfg(target_os = "android")]

@@ -170,10 +170,6 @@ enum Cmd {
     /// changes nothing.
     #[cfg(target_os = "android")]
     Weaver,
-    /// Ask the phone's secure element about itself, which reads only its
-    /// answer to reset and changes nothing.
-    #[cfg(target_os = "android")]
-    Element,
     /// Open the data partition with the key the phone keeps for it, check
     /// it and mount it writable as the phone does, and open each user's
     /// files that open; the owner's shared storage then shows at /sdcard.
@@ -358,16 +354,6 @@ fn main() -> Result<()> {
                 Ok(_) => println!("it took a credential belonging to no one"),
                 Err(e) => println!("asked about a credential belonging to no one it says: {e:#}"),
             }
-            Ok(())
-        }
-        #[cfg(target_os = "android")]
-        Cmd::Element => {
-            let binder = skyward_binder::driver::Binder::open()?;
-            let element = skyward_crypto::element::Element::open(&binder)?;
-            println!("a card is present: {}", element.present()?);
-            let atr = element.atr()?;
-            let hex: String = atr.iter().map(|b| format!("{b:02x}")).collect();
-            println!("the element answered {} bytes: {hex}", atr.len());
             Ok(())
         }
         #[cfg(target_os = "android")]

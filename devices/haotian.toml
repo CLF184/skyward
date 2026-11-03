@@ -33,6 +33,16 @@ load = ["synaptics_tcm2"]
 [touch]
 writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
 
+# The node the phone's own init opens to every program as it boots, which a
+# recovery leaves the owner's alone. The touch layer writes positions through
+# it: made root's alone, the controller reports nothing and the panel stays
+# still though its driver is loaded.
+[[owners]]
+user = "root"
+group = "root"
+mode = 0o666
+paths = ["/dev/xiaomi-touch"]
+
 # What the phone's own init runs once the system has finished starting, as
 # kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc. The kernel
 # starts the CPU clusters on the performance governor, which holds them at
