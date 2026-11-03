@@ -76,16 +76,29 @@ jobs:
       - name: Install the erofs reader
         run: sudo apt-get update && sudo apt-get install --yes erofs-utils
 
-      # Extract the motor firmware from the stock odm partition with the
-      # platform's erofs reader. It has to be in the ramdisk before init's
-      # first probe; copying it after Skyward starts is too late.
+      # Extract the motor firmware from the stock odm partition. It has to be
+      # in the ramdisk before init's first probe; copying it after Skyward
+      # starts is too late. The partition is loop-mounted and read, so only
+      # the one file is copied out of its several gigabytes. A runner whose
+      # kernel has no erofs falls back to the userspace reader.
       - name: Extract the motor firmware from the stock package
         run: |
-          mkdir -p stock/odm
+          set -eu
           target/release/skyward-pack stock --config "devices/$DEVICE.toml" --out stock/recovery.img --partition odm
-          fsck.erofs --extract=stock/odm --device=stock/odm.img
-          test -s stock/odm/firmware/cs40l26.wmfw
-          cp stock/odm/firmware/cs40l26.wmfw stock/cs40l26.wmfw
+          mkdir -p extracted
+          if sudo mount -o loop,ro -t erofs stock/odm.img extracted 2>/dev/null; then
+            cp extracted/firmware/cs40l26.wmfw stock/cs40l26.wmfw
+            sudo umount extracted
+          else
+            echo "no erofs support in the kernel; reading it in userspace"
+            fsck.erofs --extract=extracted --no-preserve --overwrite stock/odm.img
+            cp extracted/firmware/cs40l26.wmfw stock/cs40l26.wmfw
+          fi
+          # The partition is several gigabytes and its only use here was the
+          # one file just taken from it.
+          rm -rf extracted stock/odm.img
+          test -s stock/cs40l26.wmfw
+          ls -l stock/cs40l26.wmfw
 
       - name: Pack the recovery
         id: pack
