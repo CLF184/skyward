@@ -96,9 +96,11 @@ groups = ["system", "drmrpc"]
 
 # 4. Gatekeeper 凭证验证服务
 # Not the Rust one: this build ships the C one, run as system in system.
+# libqtigatekeeper is in the vendor partition's hw folder, where the phone
+# keeps the half of a HAL that its own init script adds to the search path.
 [[service]]
 path = "/vendor/bin/hw/android.hardware.gatekeeper-service-qti"
-libraries = ["/system/lib64", "/vendor/lib64"]
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
 ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
 user = "system"
 groups = ["system"]
@@ -107,10 +109,10 @@ groups = ["system"]
 # The phone's secure element is Qualcomm's, run as system in nfc and system,
 # and it registers one service for each of SIM1, SIM2 and eSE1. There is no
 # Goodix one on this build, and no description file of the name the earlier
-# configuration named.
+# configuration named. libEseUtils is in the hw folder, as gatekeeper's is.
 [[service]]
 path = "/vendor/bin/hw/android.hardware.secure_element-service.qti"
-libraries = ["/system/lib64", "/vendor/lib64"]
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
 ready_service = "android.hardware.secure_element.ISecureElement/eSE1"
 registers = [
     "android.hardware.secure_element.ISecureElement/SIM1",
