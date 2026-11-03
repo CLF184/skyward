@@ -1,0 +1,202 @@
+[device]
+codename = "haotian"
+brand = "Xiaomi"
+model = "Xiaomi 15 Pro"
+ab = true
+soc = { hans = "骁龙®8至尊版移动平台", hant = "Snapdragon® 8 Elite 行動平台", en = "Snapdragon® 8 Elite Mobile Platform" }
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+# The panel's own mode, persist.sys.miui_default_resolution in the odm
+# partition's build.prop and the o2 panel's mode in the device tree:
+# 1440 by 3200. persist.sys.miui_resolution gives the lower mode the system
+# starts in, 1080 by 2400 at 450; the density is that one's, at the panel's
+# own width, as the 13 Ultra's is.
+width = 1440
+height = 3200
+density = 600
+diagonal = 6.73
+corner_radius = 168
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
+# The touchscreen: Synaptics TouchComm over SPI behind Xiaomi's touch
+# layer, the one touch driver the phone's own modules.load lists.
+load = ["synaptics_tcm2"]
+
+# As on the 17 Ultra, no init script of the phone's starts touch_report:
+# the touch feature service turns the controller's raw frames into
+# touches with /odm/lib64/libtouchreport.so, and a recovery runs none of
+# it. Told through Xiaomi's touch layer, the driver has the controller
+# report positions itself; that is known of the 17 Ultra's Synaptics
+# controller and not yet tried on this phone's.
+[touch]
+writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
+
+# What the phone's own init runs once the system has finished starting, as
+# kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc. The kernel
+# starts the CPU clusters on the performance governor, which holds them at
+# their highest clock; the script hands them to WALT, lets idle CPUs power
+# down and sets how the memory bus scales. Without it the CPUs stay at
+# their highest clock and voltage even while idle, and the phone slowly
+# heats up.
+
+[firmware]
+partition = "modem"
+
+[partitions]
+mounted = ["persist"]
+
+
+[[service]]
+path = "/vendor/bin/sh"
+args = ["/vendor/bin/init.kernel.post_boot.sh"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+user = "root"
+groups = ["root", "system", "wakelock", "graphics"]
+
+# 1. TEE 通信守护进程
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+
+# 2. TEE 应用加载器
+[[service]]
+path = "/vendor/bin/hlosminkdaemon"
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system", "oem_2912", "wakelock"]
+capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
+
+# 3. KeyMint 密钥服务
+[[service]]
+path = "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+registers = [
+    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+    "android.hardware.security.secureclock.ISecureClock/default",
+    "android.hardware.security.sharedsecret.ISharedSecret/default",
+]
+user = "system"
+groups = ["system", "drmrpc"]
+
+# 4. Gatekeeper 凭证验证服务
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper-rust-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
+user = "system"
+groups = ["system"]
+
+# 5. Goodix 安全元件服务 (如果存在)
+[[service]]
+path = "/odm/bin/hw/android.hardware.secure_element-service-goodix"
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_service = "android.hardware.secure_element.ISecureElement/eSE2"
+registers = ["vendor.goodix.hardware.secure_element_aidl.IGdxEse/default"]
+description = "/odm/etc/secure_element-service-goodixsp.xml" # 请确认固件里有这个文件
+user = "system"
+groups = ["system"]
+
+# 6. Weaver 服务 (去掉条件限制，无条件启动)
+[[service]]
+path = "/odm/bin/hw/android.hardware.weaver-service"
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_service = "android.hardware.weaver.IWeaver/default"
+user = "system"
+groups = ["system", "drmrpc"]
+capabilities = ["WAKE_ALARM"]
+
+# The boot control, which says which slot the bootloader starts next and
+# switches it, writing where the bootloader reads it. It comes last: the
+# phone is usable without it.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot-service.qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.boot.IBootControl/default"
+user = "root"
+groups = ["root"]
+
+# WLAN: the peach node in the device tree, which either of the two Peach
+# drivers the phone's own modules.load lists and its modules.blocklist
+# leaves may drive, by the chip's revision; the phone loads both, and so do
+# these. Their cfg80211 asks for rfkill, one of the kernel's own modules in
+# system_dlkm, as the 17 Ultra's does. Its recovery covers the vendor
+# partition's firmware folder with the modem's, as the 13 Ultra's does, so
+# the settings and the MAC address are given to the loader again, under
+# the names each driver asks for: the settings from the vendor partition,
+# the address from where the vendor's links point in persist.
+# wpa_supplicant runs on the recovery's own libraries before the vendor
+# partition's, as on the 17 Ultra.
+[wlan]
+modules = ["rfkill", "qca_cld3_peach", "qca_cld3_peach_v2"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+firmware = [
+    { name = "wlan/qca_cld/peach/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/peach/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/qca_cld/peach/wlan_mac.bin", partition = "persist", path = "wlan/wlan_mac.bin" },
+    { name = "wlan/qca_cld/peach_v2/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/peach_v2/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/qca_cld/peach_v2/wlan_mac.bin", partition = "persist", path = "wlan/wlan_mac.bin" },
+]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+# The update server the stock updater of the Chinese system asks.
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+# The stock build the recovery is made on: the Chinese system's
+# OS3.0.309.0, whose full update package on the phone maker's own download
+# server holds the recovery partition the recovery is built on top of.
+[stock]
+version = "OS3.0.309.0.WOBCNXM"
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.309.0.WOBCNXM/haotian-ota_full-OS3.0.309.0.WOBCNXM-user-16.0-f9387d12d7.zip"
+recovery = "675c3755a00c993ad706550d79377e906abe2547f423f29ced2fb3587d170bd8"
+
+# qcom-hv-haptics (qcom,hv-haptics in its dtbo), whose driver says the
+# motor's resonant frequency as the 17 Ultra's does; the click is made from
+# samples at that frequency, and the strengths are the 17 Ultra's. Neither
+# is yet tried on this phone's motor.
+[haptics]
+resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
+strength = { lightest = 0.25, strongest = 0.75 }
+
+# The recovery's own logd loads libsysutils and libcap, which the stock
+# recovery leaves out, so it ends as soon as init starts it...
+[logd]
+libraries = ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]
+
+# The partitions a backup of the baseband and EFS takes...
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = [
+    "vendor/tzstorage",
+    "vendor/qtee",
+    "vendor/mitee",
+    "vendor/goodix",
+    "vendor/fingerprint",
+    "vendor/fpdata",
+    "vendor/misc/mi_fp",
+]
+
+# Where the phone's own programs keep logs in the data partition...
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/bsplog",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ramdump_ssr",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]
+
