@@ -157,8 +157,8 @@ server = "https://update.miui.com/updates/miotaV3.php"
 # server holds the recovery partition the recovery is built on top of.
 [stock]
 version = "OS3.0.309.0.WOBCNXM"
-package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.309.0.WOBCNXM/haotian-ota_full-OS3.0.309.0.WOBCNXM-user-16.0-f9387d12d7.zip"
-recovery = "675c3755a00c993ad706550d79377e906abe2547f423f29ced2fb3587d170bd8"
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.0.19.XOBCNXM/haotian-ota_full-OS4.0.0.19.XOBCNXM-user-17.0-2f40c16d06.zip"
+recovery = "657f3bed0afa0be2a9dbc07ed3d511c6acda4f82c2c5c99983b9c86d7d9358b7"
 
 # qcom-hv-haptics (qcom,hv-haptics in its dtbo), whose driver says the
 # motor's resonant frequency as the 17 Ultra's does; the click is made from
