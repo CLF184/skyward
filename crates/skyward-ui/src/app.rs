@@ -2082,6 +2082,17 @@ const DIM_DROP: f32 = 0.04;
 const DIM_CEILING: f32 = 0.05;
 /// The lowest brightness the slider sets.
 const MIN_BRIGHTNESS: f32 = 0.02;
+
+/// The share of the brightness at the slider's top that a sleeping panel
+/// shows the clock and the rest at: dark enough to read in a room at night
+/// without lighting it, and no lower, which the panel's own driver refuses
+/// anyway. Measured on a phone, every level under this one is answered by the
+/// panel's floor.
+pub const AOD_BRIGHTNESS: f32 = 0.016;
+
+/// How long the clock stays in one place before it moves on, so that no pixel
+/// of it is lit for longer than a minute at a time.
+pub const AOD_SHIFT_MS: u64 = 60_000;
 /// How much of a slider's span a volume key moves it.
 const SLIDER_STEP: f32 = 0.1;
 /// Where both sliders start: one step of the keys from their left end.
@@ -2456,6 +2467,12 @@ pub struct App {
     /// When the screen was last touched or a key pressed; set on the first
     /// tick, so the time before the UI started does not count.
     active: Option<u64>,
+    /// Whether the panel shows the clock and the rest of what it shows
+    /// while the pages are asleep, rather than being dark.
+    aod: bool,
+    /// Which minute's place the clock was last drawn at, so that it is drawn
+    /// again only when it moves on.
+    aod_at: Option<u64>,
     /// When the panel last lit from dark, for the brief guard that keeps a
     /// stray touch or key from acting on a page just put up.
     woke_at: Option<u64>,
@@ -2543,6 +2560,8 @@ impl App {
             term: None,
             display_on: true,
             active: None,
+            aod: false,
+            aod_at: None,
             woke_at: None,
             bright: full_brightness(),
             blink: None,
@@ -2631,7 +2650,11 @@ impl App {
         };
         let blink = self.blink_at(now).filter(|_| self.display_on).map(|(_, next)| next);
         let chord = self.chord.map(|(_, at)| at + CHORD_MS);
-        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink, darkens, chord].into_iter().flatten().min()
+        let shift = self.aod().then(|| (now / AOD_SHIFT_MS + 1) * AOD_SHIFT_MS);
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink, darkens, chord, shift]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Whether a text field's cursor shows at `now`, and when it next turns;
@@ -2700,6 +2723,12 @@ impl App {
             } else if idle >= after - dim_span(after) {
                 self.bright.set(false, now);
             }
+        }
+        // Asleep, the clock moves on to the next place each minute, and the
+        // minute it shows may change under it.
+        if self.aod() && self.aod_at != Some(now / AOD_SHIFT_MS) {
+            self.aod_at = Some(now / AOD_SHIFT_MS);
+            self.dirty = true;
         }
         if self.toast.as_ref().is_some_and(|m| now >= m.1) {
             self.toast = None;
@@ -2850,10 +2879,30 @@ impl App {
     /// slider's top.
     pub fn panel(&self, now: u64) -> Option<f32> {
         if !self.display_on {
-            return None;
+            // Asleep, the panel still shows the clock, dark enough to read
+            // without lighting the room.
+            return self.aod.then_some(AOD_BRIGHTNESS);
         }
         let (full, level) = (self.state.brightness, self.bright.level(now));
         Some(full * level + dim_level(full) * (1.0 - level))
+    }
+
+    /// Whether the panel shows the clock and the rest at its lowest, rather
+    /// than the page it was left on.
+    pub fn aod(&self) -> bool {
+        self.aod && !self.display_on
+    }
+
+    /// How far the clock is moved from the middle at `now`, in dp, so that a
+    /// still clock lights no pixel for longer than [`AOD_SHIFT_MS`].
+    pub fn aod_shift(&self, now: u64, t: &Theme) -> (f32, f32) {
+        // Four places, one a minute, walked in a square small enough to keep
+        // the clock where it reads as centred.
+        const PLACES: [(f32, f32); 4] = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        let step = (now / AOD_SHIFT_MS) as usize % PLACES.len();
+        let (x, y) = PLACES[step];
+        let reach = t.m.dp(6.0);
+        ((x * 2.0 - 1.0) * reach, (y * 2.0 - 1.0) * reach)
     }
 
     /// Something was touched or pressed: the panel stays at full
@@ -2867,6 +2916,8 @@ impl App {
     fn wake(&mut self, now: u64) {
         if !self.display_on {
             self.display_on = true;
+            self.aod = false;
+            self.aod_at = None;
             self.dirty = true;
         }
         self.woke_at = Some(now);
@@ -2883,6 +2934,8 @@ impl App {
     /// and the page stops where it is.
     fn sleep(&mut self) {
         self.display_on = false;
+        // The clock keeps showing, dark, rather than the panel going black.
+        self.aod = true;
         self.bright = full_brightness();
         match std::mem::replace(&mut self.drag, Drag::Idle) {
             Drag::Confirm { .. } => {
@@ -3830,7 +3883,43 @@ impl App {
     /// and its title over a scrolled page, the `<`, the page sliding in or
     /// out over or under the page left, the status bar, any message, and
     /// the back cue while a swipe from an edge is under way.
+    /// Draw what a sleeping panel shows: the time, the date under it and the
+    /// battery, in a dim grey on black, moved a little each minute so that no
+    /// pixel of it stays lit. Everything else is black, which an OLED panel
+    /// shows by lighting nothing.
+    fn compose_aod(&mut self, out: &mut Canvas, t: &Theme, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+        let m = &t.m;
+        out.clear(Rgba::rgb(0, 0, 0));
+        let (dx, dy) = self.aod_shift(now, t);
+        let (cx, cy) = (m.w as f32 / 2.0, m.h as f32 / 2.0);
+        let ink = Rgba::rgb(0x8a, 0x8a, 0x8a);
+        let faint = Rgba::rgb(0x5a, 0x5a, 0x5a);
+        // The time, large and centred a little above the middle.
+        let time_px = m.dp(72.0);
+        out.text_center(&f.title, clock, cx + dx, cy + dy - time_px * 0.5, time_px, ink);
+        // The date under it, in the zone the settings chose.
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        let date = fmt::date(self.state.lang, unix, self.state.time_zone);
+        let date_px = m.dp(16.0);
+        out.text_center(&f.body, &date, cx + dx, cy + dy + time_px * 0.55, date_px, faint);
+        // The battery at the foot, with its share.
+        if let Some(b) = &info.battery {
+            let share = format!("{}%", b.level);
+            out.text_center(&f.body, &share, cx + dx, m.h as f32 - m.dp(96.0) + dy, m.dp(14.0), faint);
+        }
+    }
+
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+        // Asleep, the panel shows only the clock and the rest of what it says
+        // about the phone, on black, and nothing of the page it was left on.
+        if self.aod() {
+            let t = self.theme();
+            self.compose_aod(out, &t, f, info, clock, now);
+            return;
+        }
         // A page opened is drawn from its left edge as it slides in.
         let opening = self.turn.as_ref().is_some_and(|t| !t.back);
         self.render(f, info, if opening { 0 } else { self.w });
