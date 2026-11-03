@@ -73,6 +73,20 @@ jobs:
 
       # The image is named for the build, the phone and the stock version it
       # is made on, as the releases name theirs; on a tag that is the tag.
+      - name: Install the erofs reader
+        run: sudo apt-get update && sudo apt-get install --yes erofs-utils
+
+      # Extract the motor firmware from the stock odm partition with the
+      # platform's erofs reader. It has to be in the ramdisk before init's
+      # first probe; copying it after Skyward starts is too late.
+      - name: Extract the motor firmware from the stock package
+        run: |
+          mkdir -p stock/odm
+          target/release/skyward-pack stock --config "devices/$DEVICE.toml" --out stock/recovery.img --partition odm
+          fsck.erofs --extract=stock/odm --device=stock/odm.img
+          test -s stock/odm/firmware/cs40l26.wmfw
+          cp stock/odm/firmware/cs40l26.wmfw stock/cs40l26.wmfw
+
       - name: Pack the recovery
         id: pack
         env:
@@ -88,22 +102,15 @@ jobs:
             --font resources/fonts/MiSansVF.ttf \
             --mono resources/fonts/KirkMono-Regular.ttf \
             --mono-license resources/fonts/KirkMono-OFL.txt \
+            --firmware cs40l26.wmfw=stock/cs40l26.wmfw \
             --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      # The image is the whole partition, flashed as it is, and most of it is
-      # the room the recovery leaves empty; it is handed out zipped.
-      - name: Zip the image
-        working-directory: out
-        env:
-          NAME: ${{ steps.pack.outputs.name }}
-        run: zip -9 "$NAME.zip" "$NAME.img"
-
-      # The artifact takes the zip's name and is not packed again, so what is
-      # downloaded is the image's own zip, as the releases hand it out.
+      # Upload the image itself. upload-artifact compresses it once; zipping
+      # here first would hand out a zip containing another zip.
       - uses: actions/upload-artifact@v4
         with:
-          path: out/${{ steps.pack.outputs.name }}.zip
-          archive: false
+          name: ${{ steps.pack.outputs.name }}
+          path: out/${{ steps.pack.outputs.name }}.img
           if-no-files-found: error
           retention-days: 30

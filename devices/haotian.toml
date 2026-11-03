@@ -61,15 +61,20 @@ groups = ["root", "system", "wakelock", "graphics"]
 path = "/vendor/bin/qseecomd"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_property = "vendor.sys.listeners.registered"
+sockets = [{ name = "notify-topology", kind = "stream", mode = 0o660, user = "system", group = "drmrpc" }]
 user = "root"
 groups = ["root", "drmrpc"]
 
 # 2. TEE 应用加载器
+# This daemon asks for ANDROID_SOCKET_hlos_mink_opener, the listener its init
+# service creates. Without that descriptor it exits at once, leaving every
+# service that talks to the TEE unable to start.
 [[service]]
 path = "/vendor/bin/hlosminkdaemon"
 libraries = ["/system/lib64", "/vendor/lib64"]
+sockets = [{ name = "hlos_mink_opener", kind = "stream", mode = 0o660, user = "system", group = "system" }]
 user = "system"
-groups = ["system", "oem_2912", "wakelock"]
+groups = ["system"]
 capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
 
 # 3. KeyMint 密钥服务
@@ -134,10 +139,12 @@ ready_service = "android.hardware.boot.IBootControl/default"
 user = "root"
 groups = ["root"]
 
-# WLAN: the peach node in the device tree, which either of the two Peach
-# drivers the phone's own modules.load lists and its modules.blocklist
-# leaves may drive, by the chip's revision; the phone loads both, and so do
-# these. Their cfg80211 asks for rfkill, one of the kernel's own modules in
+# WLAN: the peach node in the device tree. The installed system's Peach
+# modules in vendor_dlkm are built for 6.6.57, whereas this recovery kernel is
+# 6.6.118: they cannot be loaded into it. A recovery carrying a matching set
+# must use that set here; this configuration cannot enable WLAN from the
+# installed system's modules alone.
+# Their cfg80211 asks for rfkill, one of the kernel's own modules in
 # system_dlkm, as the 17 Ultra's does. Its recovery covers the vendor
 # partition's firmware folder with the modem's, as the 13 Ultra's does, so
 # the settings and the MAC address are given to the loader again, under

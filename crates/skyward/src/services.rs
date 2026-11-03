@@ -10,12 +10,15 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// A program that ends sooner than this after starting waits this long
-/// before it is started again.
-const RESTART_DELAY: Duration = Duration::from_secs(1);
+/// before it is started again. A phone's secure-world programs may fail until
+/// their TEE listener is ready; a one-second restart loop only hides the
+/// first useful error under hundreds of identical ones.
+const RESTART_DELAY: Duration = Duration::from_secs(5);
 
 /// How long a program gets to become what it says it will be.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -54,16 +57,23 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         if let Some(dir) = libraries {
             s.libraries.push(dir.to_string_lossy().into_owned());
         }
+        let sockets = match listeners(&s, &known) {
+            Ok(sockets) => sockets,
+            Err(e) => {
+                skyward_sys::kmsg(&format!("{}: its socket cannot be made, so it is not started: {e:#}", s.path))?;
+                continue;
+            }
+        };
         let who = Credentials::of(&s, &known)?;
         if s.oneshot {
-            let status = command(&s, &who).status().with_context(|| format!("run {}", s.path))?;
+            let status = command(&s, &who, &sockets).status().with_context(|| format!("run {}", s.path))?;
             ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
             skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
             continue;
         }
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
-        thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
+        thread::Builder::new().name(name).spawn(move || supervise(&s, &who, sockets)).context("start a supervising thread")?;
         // A program that does not become what it says it will be holds up
         // the pages no longer: it is said in the kernel log and the next
         // program starts. One that registers later is still found by what
@@ -73,6 +83,80 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A socket made as the phone's init makes it, with the descriptor Android
+/// hands the service in `ANDROID_SOCKET_<name>`.
+struct Listening {
+    name: String,
+    fd: OwnedFd,
+}
+
+/// The listeners this recovery has made, kept so a service that is started
+/// again gets the same listener rather than a second socket at its address.
+static LISTENERS: OnceLock<Mutex<HashMap<String, Listening>>> = OnceLock::new();
+
+/// Give the service its listening sockets. Android's socket helper takes the
+/// first free descriptor at or above 50 and duplicates it there, so that is
+/// what the environment variable names.
+fn listeners(s: &Service, known: &HashMap<String, u32>) -> Result<Vec<Listening>> {
+    let kept = LISTENERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut kept = kept.lock().expect("no panic while holding the service sockets");
+    s.sockets.iter().map(|socket| {
+        if !kept.contains_key(&socket.name) {
+            let listening = listen(socket, known)?;
+            kept.insert(socket.name.clone(), listening);
+        }
+        let socket = &kept[&socket.name];
+        let fd = unsafe { libc::fcntl(socket.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 50) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error()).context("give the service its socket descriptor");
+        }
+        Ok(Listening { name: socket.name.clone(), fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+    })
+    .collect()
+}
+
+/// Make one listening socket as the phone's init does.
+fn listen(socket: &skyward_config::InitSocket, known: &HashMap<String, u32>) -> Result<Listening> {
+    let uid = ueventd::account(known, &socket.user).with_context(|| format!("no user {}", socket.user))?;
+    let gid = ueventd::account(known, &socket.group).with_context(|| format!("no group {}", socket.group))?;
+    let kind = match socket.kind.as_str() {
+        "stream" => libc::SOCK_STREAM,
+        "dgram" => libc::SOCK_DGRAM,
+        "seqpacket" => libc::SOCK_SEQPACKET,
+        _ => unreachable!("the configuration checks the socket kind"),
+    };
+    let fd = unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error()).context("make a service socket");
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let path = Path::new("/dev/socket").join(&socket.name);
+    fs::create_dir_all("/dev/socket").context("make /dev/socket")?;
+    let address = unsafe { socket_address(&path) };
+    if unsafe { libc::bind(fd.as_raw_fd(), (&address.0 as *const libc::sockaddr_un).cast(), address.1) } != 0 {
+        return Err(io::Error::last_os_error()).with_context(|| format!("bind {}", path.display()));
+    }
+    std::os::unix::fs::chown(&path, Some(uid), Some(gid)).with_context(|| format!("give {}", path.display()))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(socket.mode)).with_context(|| format!("set {}", path.display()))?;
+    if kind != libc::SOCK_DGRAM && unsafe { libc::listen(fd.as_raw_fd(), 4) } != 0 {
+        return Err(io::Error::last_os_error()).context("listen on a service socket");
+    }
+    Ok(Listening { name: socket.name.clone(), fd })
+}
+
+/// A Unix-domain socket address and its exact length, without trailing NULs.
+fn socket_address(path: &Path) -> (libc::sockaddr_un, libc::socklen_t) {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as _;
+    }
+    let length = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+    (address, length)
 }
 
 /// Who a program runs as and what of root's it keeps, as the phone's own
@@ -176,7 +260,15 @@ fn ready(s: &Service) -> Result<()> {
         _ => return Ok(()),
     };
     let until = Instant::now() + READY_TIMEOUT;
+    let mut lived = false;
     loop {
+        // A program that has already died cannot become ready. Say so now
+        // rather than waiting out twenty seconds for each dead service.
+        if let Some(pid) = running(&s.path) {
+            lived = true;
+        } else if lived || Instant::now() + READY_POLL >= until {
+            bail!("{} has already ended, so it {waited_on}", s.path);
+        }
         if let Some(name) = &s.ready_property {
             if skyward_sys::prop(name).is_some_and(|v| !v.is_empty()) {
                 return Ok(());
@@ -201,12 +293,12 @@ fn ready(s: &Service) -> Result<()> {
     }
 }
 
-fn supervise(s: &Service, who: &Credentials) -> ! {
+fn supervise(s: &Service, who: &Credentials, sockets: Vec<Listening>) -> ! {
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
-            None => run(s, who),
+            None => run(s, who, &sockets),
         };
         let line = match ended {
             Ok(how) => format!("{}: {how}", s.path),
@@ -220,8 +312,8 @@ fn supervise(s: &Service, who: &Credentials) -> ! {
 }
 
 /// Start the program and wait for it to end.
-fn run(s: &Service, who: &Credentials) -> Result<String> {
-    let mut child = command(s, who).spawn().with_context(|| format!("start {}", s.path))?;
+fn run(s: &Service, who: &Credentials, sockets: &[Listening]) -> Result<String> {
+    let mut child = command(s, who, sockets).spawn().with_context(|| format!("start {}", s.path))?;
     let status = child.wait().context("wait for it")?;
     Ok(format!("pid {} ended: {status}", child.id()))
 }
@@ -229,11 +321,14 @@ fn run(s: &Service, who: &Credentials) -> Result<String> {
 /// The program as it is started: with what it is given, from the top of the
 /// tree, reading and writing nothing of the recovery's, finding its
 /// libraries where it names them, and as `who`.
-fn command(s: &Service, who: &Credentials) -> Command {
+fn command(s: &Service, who: &Credentials, sockets: &[Listening]) -> Command {
     let mut cmd = Command::new(&s.path);
     cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
+    }
+    for socket in sockets {
+        cmd.env(format!("ANDROID_SOCKET_{}", socket.name), socket.fd.as_raw_fd().to_string());
     }
     let who = who.clone();
     // Only system calls run between the fork and the exec, on what was

@@ -500,9 +500,9 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
-    // The motor's driver may need modules of its own, and firmware its probe
-    // ends without. Neither is the pages', so a motor that still makes no
-    // force-feedback device is left for the pages to do without.
+    // The motor driver is loaded by init before the recovery can mount its
+    // partitions. Put its firmware where the firmware loader looks before
+    // that first probe, and unbind it again if that probe already failed.
     if let Some(haptics) = &cfg.haptics {
         if let Err(e) = haptics::bring_up(haptics, &cfg.modules.sources) {
             skyward_sys::kmsg(&format!("the motor's driver is not brought up: {e:#}"))?;

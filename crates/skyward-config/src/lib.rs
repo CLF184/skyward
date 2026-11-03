@@ -390,6 +390,22 @@ pub struct Service {
     /// names it: it keeps these alone, through its change of user.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Listening sockets init would make for the program and pass in
+    /// ANDROID_SOCKET_<name>. A program that opens its listener by that name
+    /// cannot start without it, as Qualcomm's hlosminkdaemon does.
+    #[serde(default)]
+    pub sockets: Vec<InitSocket>,
+}
+
+/// A listening socket a phone's own init passes to a service. `kind` is
+/// "stream", "dgram" or "seqpacket", as in an init socket line.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct InitSocket {
+    pub name: String,
+    pub kind: String,
+    pub mode: u32,
+    pub user: String,
+    pub group: String,
 }
 
 /// The kernel's capabilities, by the names init's capabilities lines give
@@ -520,6 +536,12 @@ impl DeviceConfig {
             }
             for name in &s.capabilities {
                 ensure!(capability(name).is_some(), "[[service]] {}: {name} is not a capability init knows", s.path);
+            }
+            for socket in &s.sockets {
+                ensure!(!socket.name.is_empty() && !socket.name.contains('/'), "[[service]] {}: a socket needs a plain name", s.path);
+                ensure!(matches!(socket.kind.as_str(), "stream" | "dgram" | "seqpacket"), "[[service]] {}: {} is not a socket kind", s.path, socket.kind);
+                ensure!(socket.mode <= 0o7777, "[[service]] {}: socket mode {:o} is not a file mode", s.path, socket.mode);
+                ensure!(!socket.user.is_empty() && !socket.group.is_empty(), "[[service]] {}: a socket needs its user and group", s.path);
             }
         }
         for folder in &cfg.backup.data_skipped {
@@ -666,6 +688,16 @@ mod tests {
             let s = format!("click = 0\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
             assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
         }
+    }
+
+    #[test]
+    fn a_service_socket_is_named_as_init_names_it() {
+        let text = "[device]\ncodename = \"x\"\n[[service]]\npath = \"/vendor/bin/daemon\"\nsockets = [{ name = \"hlos_mink_opener\", kind = \"stream\", mode = 0o660, user = \"system\", group = \"system\" }]\n";
+        let cfg = DeviceConfig::parse(text).unwrap();
+        assert_eq!(cfg.services[0].sockets[0].name, "hlos_mink_opener");
+        assert_eq!(cfg.services[0].sockets[0].mode, 0o660);
+        assert!(DeviceConfig::parse(text.replace("kind = \"stream\"", "kind = \"unknown\"")).is_err());
+        assert!(DeviceConfig::parse(text.replace("name = \"hlos_mink_opener\"", "name = \"/dev/bad\"")).is_err());
     }
 
     #[test]
