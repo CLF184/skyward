@@ -19,10 +19,14 @@ pub fn source_dir(source: &str) -> Result<PathBuf> {
 
 /// Load `names` (module names without `.ko`) with their dependencies. Each
 /// comes from the first of `dirs` that holds it, and its dependencies from
-/// that directory's modules.dep; a module the kernel already has counts as
-/// loaded. Returns the files loaded, dependencies first.
+/// whichever directory holds them: a phone keeps one driver in the vendor
+/// partition and the parts of the kernel it is built on in the ramdisk, so a
+/// single directory holds neither the whole of a driver nor everything it
+/// needs. A module the kernel already has counts as loaded. Returns the files
+/// loaded, dependencies first.
 pub fn load(dirs: &[PathBuf], names: &[String]) -> Result<Vec<PathBuf>> {
     let mut loaded = Vec::new();
+    let mut done = BTreeSet::new();
     for name in names {
         let file = format!("{name}.ko");
         let dir = dirs
@@ -31,14 +35,24 @@ pub fn load(dirs: &[PathBuf], names: &[String]) -> Result<Vec<PathBuf>> {
             .ok_or_else(|| anyhow!("{file} is in none of {dirs:?}"))?;
         let graph = parse_dep(dir)?;
         for m in graph.load_order(std::slice::from_ref(&file)) {
-            let path = graph
-                .resolve_path(&m)
-                .ok_or_else(|| anyhow!("{m} is listed in {}/modules.dep but missing", dir.display()))?;
+            if !done.insert(m.clone()) {
+                continue;
+            }
+            // The graph knows where the module it named lists its own parts,
+            // which is not always where this one came from.
+            let path = graph.resolve_path(&m).or_else(|| elsewhere(dirs, &m));
+            let path = path.with_context(|| format!("{m} is listed in {}/modules.dep but is in no source", dir.display()))?;
             insmod(&path, "")?;
             loaded.push(path);
         }
     }
     Ok(loaded)
+}
+
+/// A module file in any of `dirs`, for one a directory's own graph names but
+/// does not hold.
+fn elsewhere(dirs: &[PathBuf], file: &str) -> Option<PathBuf> {
+    dirs.iter().map(|d| d.join(file)).find(|p| p.is_file())
 }
 
 /// A `modules.dep` graph: each module file mapped to the module files it
