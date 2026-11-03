@@ -26,6 +26,12 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 - 重启到系统、recovery、fastboot、bootloader 和 EDL，切换启动槽位
 - 浅色和深色模式，简体中文、繁体中文和英文
 
+## 小米 15 Pro 说明
+
+`haotian` 已在真机上测试过，屏幕、触摸、adb 和 fastbootd、MTP，以及用锁屏密码解密 data 分区都可以使用。振动不可用：马达驱动向内核请求一个 recovery 尚未建立的电源状态。
+
+制作镜像所用的原厂版本是 OS4.0.0.19.XOBCNXM。
+
 ## 支持的机型
 
 | 机型 | 代号 | 测试的系统版本 |

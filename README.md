@@ -26,6 +26,15 @@ Skyward is a recovery written in Rust, from scratch.
 - Reboot to system, recovery, fastboot, bootloader or EDL, and switch slots
 - Light and dark themes; Simplified Chinese, Traditional Chinese and English
 
+## Notes on the Xiaomi 15 Pro
+
+`haotian` has been tried on the phone, and these work there: the screen, the
+touchscreen, adb and fastbootd, MTP, and decrypting the data partition with
+the screen lock's credential. Vibration does not, because the motor's driver
+asks the kernel for a power state a recovery has not set up.
+
+The stock build the image is made on is OS4.0.0.19.XOBCNXM.
+
 ## Supported devices
 
 | Device | Codename | Tested system version |
