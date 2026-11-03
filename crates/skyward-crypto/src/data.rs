@@ -364,6 +364,7 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
             ),
         },
     };
+    let id = beside_the_weaver(&dir, &id, ids)?;
     // A user who has set a screen lock has what the phone recorded about
     // it beside the blob; a user who has set none has nothing there.
     let recorded = dir.join(format!("{id}.pwd"));
@@ -388,6 +389,37 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
         id,
         lock,
     })
+}
+
+/// The blob to open, which is `id` unless that one is bound to a weaver and
+/// another of the user's blobs is not.
+///
+/// A phone whose weaver is a Thales secure element reaches it only through
+/// Android's own OMAPI service, and a recovery runs none of the framework, so
+/// such a blob cannot be opened here at all. The phone writes a second blob
+/// bound instead to bytes kept beside it, with the credential checked by the
+/// credential service of the older kind, which a recovery does run. It is the
+/// same secret: what changes is what guards it. HyperOS keeps the two side by
+/// side and records the weaver one as the current, so the other is taken when
+/// the weaver cannot answer.
+fn beside_the_weaver(dir: &Path, id: &str, ids: Vec<String>) -> Result<String> {
+    if !dir.join(format!("{id}.weaver")).exists() {
+        return Ok(id.to_string());
+    }
+    let usable = ids.into_iter().find(|other| {
+        let at = |suffix: &str| dir.join(format!("{other}.{suffix}"));
+        !at("weaver").exists() && at("secdis").is_file() && at("pwd").is_file()
+    });
+    match usable {
+        Some(other) => {
+            // Said as it happens, so a recovery that opens the second blob
+            // rather than the recorded one can be told apart from one that
+            // opens what the phone recorded.
+            eprintln!("the recorded blob is bound to a weaver the recovery cannot reach; opening the one bound beside it");
+            Ok(other)
+        }
+        None => Ok(id.to_string()),
+    }
 }
 
 /// Which of the secure world's slots a user's enrolments sit in. What the
