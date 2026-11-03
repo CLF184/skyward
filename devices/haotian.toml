@@ -73,8 +73,12 @@ groups = ["system", "oem_2912", "wakelock"]
 capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
 
 # 3. KeyMint 密钥服务
+# The binary is the one this build carries: the phone has no
+# android.hardware.security.onekeymint-service-qti, which other Xiaomi builds
+# of the same chip do. Its init script runs it as system in system and
+# drmrpc.
 [[service]]
-path = "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti"
+path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
 registers = [
@@ -86,31 +90,39 @@ user = "system"
 groups = ["system", "drmrpc"]
 
 # 4. Gatekeeper 凭证验证服务
+# Not the Rust one: this build ships the C one, run as system in system.
 [[service]]
-path = "/vendor/bin/hw/android.hardware.gatekeeper-rust-service-qti"
+path = "/vendor/bin/hw/android.hardware.gatekeeper-service-qti"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
 user = "system"
 groups = ["system"]
 
-# 5. Goodix 安全元件服务 (如果存在)
+# 5. 安全元件服务
+# The phone's secure element is Qualcomm's, run as system in nfc and system,
+# and it registers one service for each of SIM1, SIM2 and eSE1. There is no
+# Goodix one on this build, and no description file of the name the earlier
+# configuration named.
 [[service]]
-path = "/odm/bin/hw/android.hardware.secure_element-service-goodix"
-libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
-ready_service = "android.hardware.secure_element.ISecureElement/eSE2"
-registers = ["vendor.goodix.hardware.secure_element_aidl.IGdxEse/default"]
-description = "/odm/etc/secure_element-service-goodixsp.xml" # 请确认固件里有这个文件
+path = "/vendor/bin/hw/android.hardware.secure_element-service.qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.secure_element.ISecureElement/eSE1"
+registers = [
+    "android.hardware.secure_element.ISecureElement/SIM1",
+    "android.hardware.secure_element.ISecureElement/SIM2",
+]
 user = "system"
-groups = ["system"]
+groups = ["nfc", "system"]
 
-# 6. Weaver 服务 (去掉条件限制，无条件启动)
+# 6. Weaver 服务
+# Thales' weaver, run as vendor_thales_weaver in that group, system and
+# drmrpc, as its init script on the odm partition has it.
 [[service]]
-path = "/odm/bin/hw/android.hardware.weaver-service"
-libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+path = "/odm/bin/hw/android.hardware.weaver-service.thales"
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64"]
 ready_service = "android.hardware.weaver.IWeaver/default"
-user = "system"
-groups = ["system", "drmrpc"]
-capabilities = ["WAKE_ALARM"]
+user = "vendor_thales_weaver"
+groups = ["vendor_thales_weaver", "system", "drmrpc"]
 
 # The boot control, which says which slot the bootloader starts next and
 # switches it, writing where the bootloader reads it. It comes last: the
@@ -163,16 +175,19 @@ recovery = "675c3755a00c993ad706550d79377e906abe2547f423f29ced2fb3587d170bd8"
 # Logic's CS40L26 on i2c 0-0043, whose driver the phone's own init loads as
 # cs40l26-core, cs40l26-i2c and snd-soc-cs40l26. Its probe reads
 # cs40l26.wmfw through the kernel's loader, and ends with error -2 when the
-# file is not there, so no force-feedback device appears until it is. The
-# firmware is on the odm partition, under the folder the kernel's own
-# firmware_class.path names in its command line.
+# file is not there, so no force-feedback device appears until it is.
 #
-# The chip says its motor's resonant frequency nowhere, so no file is named
-# for it: the click is made at the frequency these linear motors swing at,
-# and the strengths are the 17 Ultra's.
+# The firmware sits at the top of /odm/firmware, which is the fourth of the
+# phone's own firmware folders: the kernel's firmware_class.path names
+# /odm/firmware/o8, but no such folder is in this build, so the driver is
+# given the file by name through the recovery's own loader folders. The
+# driver keeps no waveform of its own; it plays the samples it is handed, so
+# the click is made, at the frequency its calibration says the motor swings
+# at, f0_stored in the input device's calibration folder.
 [haptics]
 modules = ["cs40l26-core", "cs40l26-i2c"]
-firmware = [{ name = "cs40l26.wmfw", path = "/odm/firmware/o8/cs40l26.wmfw" }]
+firmware = [{ name = "cs40l26.wmfw", path = "/odm/firmware/cs40l26.wmfw" }]
+resonance = "/sys/bus/i2c/devices/0-0043/input/input6/calibration/f0_stored"
 strength = { lightest = 0.25, strongest = 0.75 }
 
 # The recovery's own logd loads libsysutils and libcap, which the stock

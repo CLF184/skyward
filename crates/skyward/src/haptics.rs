@@ -216,15 +216,41 @@ fn share(strength: &Strength, position: f32) -> f32 {
     strength.lightest * (strength.strongest / strength.lightest).powf(position.clamp(0.0, 1.0))
 }
 
+/// What these motors swing at, from the slowest to the fastest a linear
+/// motor of this kind has. A frequency read as a number outside it was not
+/// in hertz in the first place.
+const SWINGS_BETWEEN: (f32, f32) = (20.0, 400.0);
+
 /// The motor's resonant frequency in hertz, from the file the driver says
-/// it in, in tenths of a hertz. A driver that says it nowhere, as Cirrus
-/// Logic's CS40L26 does not, still takes a click made for a frequency near
-/// the one these motors swing at.
+/// it in. A driver that says it nowhere, as Cirrus Logic's CS40L26 does not,
+/// still takes a click made for a frequency near the one these motors swing
+/// at.
+///
+/// The files differ in what they count in. Qualcomm's says tenths of a
+/// hertz in plain decimal. Cirrus Logic's `f0_stored` says it in ten
+/// thousandths of a hertz, as hexadecimal: `00202CAB` is 210.859 Hz. What a
+/// file counts in is not something the recovery can ask it, so both readings
+/// are tried and the one that comes out a frequency these motors have is
+/// taken; neither is, and the click is made at the nominal one rather than at
+/// a frequency no motor swings at.
 fn resonance(file: &str) -> Result<f32> {
     let text = fs::read_to_string(file).with_context(|| format!("read {file}"))?;
-    let tenths: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;
-    ensure!(tenths > 0, "{file} says the motor swings at 0 Hz");
-    Ok(tenths as f32 / 10.0)
+    let raw = text.split_whitespace().next().with_context(|| format!("{file} is empty"))?;
+    // A leading zero is how the driver stamps the hexadecimal it writes, and
+    // plain decimal never needs one.
+    let hex = raw.strip_prefix("0x").or_else(|| raw.starts_with('0').then_some(raw));
+    let counted = match hex {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => raw.parse(),
+    }
+    .with_context(|| format!("{file} holds {text:?}"))?;
+    ensure!(counted > 0, "{file} says the motor swings at 0 Hz");
+    // The two counts the drivers use, ten thousandths and tenths of a hertz,
+    // and whichever of them lands in range.
+    let swept = [counted as f32 / 10_000.0, counted as f32 / 10.0]
+        .into_iter()
+        .find(|hz| (SWINGS_BETWEEN.0..=SWINGS_BETWEEN.1).contains(hz));
+    swept.with_context(|| format!("{file} says {counted}, which is no frequency these motors swing at"))
 }
 
 /// A click's samples at [`RATE`] for a motor that swings at `hz`: whole
