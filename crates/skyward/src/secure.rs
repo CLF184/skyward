@@ -30,6 +30,12 @@ const VENDOR_INTERFACE: &str = "ro.vndk.version";
 const DESCRIPTIONS: [&str; 2] = ["/vendor/etc/vintf/manifest", "/odm/etc/vintf/manifest"];
 const RECOVERY_DESCRIPTIONS: &str = "/system/etc/vintf/manifest";
 
+/// Where the phone keeps the descriptions that are not split into the folder
+/// above: one file per build of the platform's hardware stack, named after
+/// the platform, as sun and tuna are. The phone carries every platform's, and
+/// only the running one's describes hardware that is here.
+const PLATFORM_DESCRIPTIONS: [&str; 2] = ["/vendor/etc/vintf", "/odm/etc/vintf"];
+
 /// The name init knows the service directory by, and the program it runs.
 const DIRECTORY_SERVICE: &str = "servicemanager";
 const DIRECTORY_PROGRAM: &str = "/system/bin/servicemanager";
@@ -274,6 +280,18 @@ pub fn publish_descriptions(wanted: &[String], files: &[String]) -> Result<usize
                 continue;
             }
             let text = fs::read_to_string(&from).with_context(|| format!("read {}", from.display()))?;
+            if wanted.iter().any(|w| describes(&text, w)) {
+                take(&from, &text)?;
+            }
+        }
+    }
+    // The platform's own descriptions, which are not in the folder above: one
+    // file per build of the hardware stack, named after the platform. Only the
+    // running platform's describes hardware that is here, so only it is read.
+    if let Some(platform) = skyward_sys::prop("ro.board.platform") {
+        for dir in PLATFORM_DESCRIPTIONS {
+            let from = Path::new(dir).join(format!("manifest_{platform}.xml"));
+            let Ok(text) = fs::read_to_string(&from) else { continue };
             if wanted.iter().any(|w| describes(&text, w)) {
                 take(&from, &text)?;
             }
