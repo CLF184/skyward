@@ -319,7 +319,7 @@ const OMAPI_FILES: [(&str, &str, u32); 10] = [
 /// A stock recovery that already runs the service keeps its own: the two
 /// would answer to the same name, and the second to register would replace
 /// the first.
-fn install_omapi(rd: &mut Ramdisk, stage: &PathBuf, read: &impl Fn(&PathBuf) -> Result<Vec<u8>>) -> Result<()> {
+fn install_omapi(rd: &mut Ramdisk, stage: &Path, read: &impl Fn(&PathBuf) -> Result<Vec<u8>>) -> Result<()> {
     if rd.find(OMAPI_FILES[0].1).is_some() {
         return Ok(());
     }
