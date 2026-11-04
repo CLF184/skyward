@@ -441,7 +441,10 @@ pub fn update_value(l: Lang, s: &Standing) -> &'static str {
 pub fn data(l: Lang, d: &Data) -> &'static str {
     l.pick(match d {
         Data::Closed | Data::Opening | Data::Failed(_) => ["未挂载", "未掛載", "Not mounted"],
-        Data::Locked { .. } => ["未解密", "未解密", "Locked"],
+        // The owner is user 0: once the owner's own files are open the
+        // phone's storage reads, whatever a second space's user waits on.
+        Data::Locked { user: 0, .. } => ["未解密", "未解密", "Locked"],
+        Data::Locked { .. } => ["已解密", "已解密", "Decrypted"],
         Data::Open => ["已解密", "已解密", "Decrypted"],
         Data::Erased => ["已清除", "已清除", "Wiped"],
     })

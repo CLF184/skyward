@@ -280,11 +280,46 @@ fn asked(request: &bcb::Request) -> Asked {
     }
 }
 
-/// Read a folder for the file manager, as it is now.
-fn list(app: &mut App, folder: String) -> Result<()> {
-    let files = read_folder(Path::new(&folder)).map_err(|e| format!("{e:#}"));
+/// Read a folder for the file manager, as it is now. A folder of a user
+/// whose own files are still closed says so in place of its entries: the
+/// names in it cannot be read until that user's credential is given.
+fn list(app: &mut App, folder: String, closed: &[Closed]) -> Result<()> {
+    let files = match closed_to_user(closed, Path::new(&folder)) {
+        Some((_, why)) => Err(why),
+        None => read_folder(Path::new(&folder)).map_err(|e| format!("{e:#}")),
+    };
     app.set_files(folder, files, unix_now()?);
     Ok(())
+}
+
+/// The number of the user a folder of the data partition belongs to, where
+/// it is one of the phone's own user areas: `/data/user/<n>`, where each
+/// user's own files live, and `/data/media/<n>`, where a user's shared
+/// storage does. `None` for every other folder.
+fn user_of(path: &Path) -> Option<u32> {
+    skyward_crypto::users::user_of(path)
+}
+
+/// What to say of a folder that cannot be listed because the own files of
+/// `user` are still closed, or `None` when that is not why.
+///
+/// A phone that keeps a second space or a cloned app open has users whose
+/// own files stay closed until their credential is given: the recovery
+/// opens the owner's and leaves the rest for the file manager to offer. A
+/// folder of theirs, opened before that, reads as names it cannot show, so
+/// the page says which user's files are still closed rather than that the
+/// folder is empty or broken.
+fn closed_to_user(closed: &[Closed], path: &Path) -> Option<(u32, String)> {
+    let user = user_of(path)?;
+    let entry = closed.iter().find(|c| c.user == user)?;
+    let why = match &entry.why {
+        Some(why) => format!("user {user}'s own files did not open: {why}"),
+        None => format!(
+            "user {user}'s own files are still closed. The recovery opens the owner's first; \
+             return to the decrypt page and enter this user's screen lock to open them."
+        ),
+    };
+    Some((user, why))
 }
 
 /// Read a folder of `place` to choose a file to install in, as it is now;
@@ -815,11 +850,17 @@ fn log_mounted(mounted: &Opened) -> Result<()> {
     skyward_sys::kmsg(&format!("{} holds {} at {}", mounted.mapped.display(), mounted.filesystem, skyward_crypto::data::MOUNT))
 }
 
-/// Show what the data partition still keeps closed: the first user whose
-/// own files wait on a screen lock they set themselves, with the control
-/// that lock is answered with, or nothing. Users whose credential the phone
-/// made up open behind the owner and are never asked; one that did not
-/// open goes to the kernel log with why.
+/// Show what the data partition still keeps closed: the owner's screen lock,
+/// where the owner's own files wait on one, with the control it is answered
+/// with, or nothing. Users whose credential the phone made up open behind
+/// the owner and are never asked; one that did not open goes to the kernel
+/// log with why.
+///
+/// A further user's own files — a second space's, a cloned app's — are left
+/// closed without being asked about: the owner came to open the owner's
+/// files, and holding the recovery at such a user's prompt while the
+/// owner's files are open behind it helps nobody. The file manager offers to
+/// open one when a folder of theirs is opened instead.
 fn show_closed(app: &mut App, closed: &[Closed]) -> Result<()> {
     use skyward_crypto::user::Lock;
     skyward_sys::kmsg(&format!("the users whose own files are still closed: {:?}", closed.iter().map(|c| c.user).collect::<Vec<_>>()))?;
@@ -828,16 +869,40 @@ fn show_closed(app: &mut App, closed: &[Closed]) -> Result<()> {
             skyward_sys::kmsg(&format!("the files of user {} stay closed: {why}", c.user))?;
         }
     }
-    let waiting = closed.iter().find(|c| !c.made_up).map(|c| {
-        let keys = match c.lock {
-            Lock::PATTERN => Keys::Pattern,
-            Lock::PIN => Keys::Digits,
-            _ => Keys::Letters,
-        };
-        (c.user, keys)
+    let asking = skyward_crypto::users::ask(&waiting_of(closed));
+    let waiting = asking.and_then(|user| {
+        closed.iter().find(|c| c.user == user).map(|c| {
+            let keys = match c.lock {
+                Lock::PATTERN => Keys::Pattern,
+                Lock::PIN => Keys::Digits,
+                _ => Keys::Letters,
+            };
+            (c.user, keys)
+        })
     });
-    app.data_waiting(waiting);
+    // Those the page offers by name rather than asks for: every user still
+    // closed that the phone did not make a credential up for, but not the
+    // one being asked for.
+    let others = closed
+        .iter()
+        .filter(|c| !c.made_up && Some(c.user) != asking)
+        .map(|c| {
+            let keys = match c.lock {
+                Lock::PATTERN => Keys::Pattern,
+                Lock::PIN => Keys::Digits,
+                _ => Keys::Letters,
+            };
+            (c.user, keys)
+        })
+        .collect();
+    app.data_waiting(waiting, others);
     Ok(())
+}
+
+/// The users `closed` names, as much of each as the choice between them
+/// needs.
+fn waiting_of(closed: &[Closed]) -> Vec<skyward_crypto::users::Waiting> {
+    closed.iter().map(|c| skyward_crypto::users::Waiting { user: c.user, made_up: c.made_up }).collect()
 }
 
 /// What the file manager lists for a folder: its entries, folders and
@@ -1644,7 +1709,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if worked {
             worker = None;
             let folder = app.state.files.path.clone();
-            list(&mut app, folder)?;
+            list(&mut app, folder, &closed)?;
         }
         let mut backed = false;
         if let Some(b) = &backuper {
@@ -1773,7 +1838,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     show_closed(&mut app, &closed)?;
                 }
                 decrypt::Ended::Unlocked(Err(why)) => {
-                    skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;
+                    // Which user the credential was for, so that a page
+                    // holding the recovery at a second space's prompt is not
+                    // read as the owner's own credential being wrong.
+                    let who = match app.state.data {
+                        Data::Locked { user, .. } => format!("the files of user {user}"),
+                        _ => "the user's own files".to_string(),
+                    };
+                    skyward_sys::kmsg(&format!("what was entered did not open {who}: {why}"))?;
                     app.unlock_failed(why, now);
                 }
             }
@@ -1995,7 +2067,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential: code.into_bytes() };
                         decryptor = Some(Decryptor::start(job)?);
                     }
-                    Effect::ReadDir(folder) => list(&mut app, folder)?,
+                    Effect::ReadDir(folder) => list(&mut app, folder, &closed)?,
                     Effect::ReadPlace(place, folder) => list_place(&mut app, place, folder)?,
                     // A name taken where an entry goes is the user's to
                     // decide on before anything is written.
@@ -2218,7 +2290,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         Ok(()) => {
                             app.text_saved(Ok(()), now);
                             let folder = app.state.files.path.clone();
-                            list(&mut app, folder)?;
+                            list(&mut app, folder, &closed)?;
                         }
                         Err(e) => app.text_saved(Err(format!("{e:#}")), now),
                     },
@@ -2226,7 +2298,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         Ok(_) => {
                             app.renamed(Ok(()), now);
                             let folder = app.state.files.path.clone();
-                            list(&mut app, folder)?;
+                            list(&mut app, folder, &closed)?;
                         }
                         Err(e) if e.is::<skyward_files::Taken>() => app.renamed(Err(RenameRefused::Taken), now),
                         Err(e) => app.renamed(Err(RenameRefused::Failed(format!("{e:#}"))), now),

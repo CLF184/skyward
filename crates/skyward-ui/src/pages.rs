@@ -651,14 +651,7 @@ pub fn decrypt(cx: &Ctx) -> Frame {
             Some(l.pick(["正在读取锁屏方式", "正在讀取螢幕鎖定方式", "Reading the screen lock"])),
             None,
         ),
-        Data::Open => data_status(
-            cx,
-            c,
-            Icon::Folder,
-            l.pick(["data 分区已解密", "data 分割區已解密", "The data partition is decrypted"]),
-            Some(l.pick(["你可以在「文件管理」中查看本机文件", "你可以在「檔案管理」中查看本機檔案", "You can see the phone's files in File manager"])),
-            None,
-        ),
+        Data::Open => open_with_others(cx, c),
         Data::Failed(why) => data_status(cx, c, Icon::Lock, l.pick(["未能打开 data 分区", "無法開啟 data 分割區", "Couldn't open the data partition"]), None, Some(why)),
         Data::Erased => data_status(
             cx,
@@ -669,6 +662,68 @@ pub fn decrypt(cx: &Ctx) -> Frame {
             None,
         ),
     }
+}
+
+/// The partitions open: the owner's files first, then, where a phone keeps
+/// further users whose own files are still closed — a second space's, a
+/// cloned app's — each offered by name, since the owner came to open the
+/// owner's files and those do not hold the recovery. Tapping one asks for
+/// that user's screen lock.
+fn open_with_others(cx: &Ctx, mut c: Canvas) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let m = &t.m;
+    let others = &s.others;
+    if others.is_empty() {
+        return data_status(
+            cx,
+            c,
+            Icon::Folder,
+            l.pick(["data 分区已解密", "data 分割區已解密", "The data partition is decrypted"]),
+            Some(l.pick(["你可以在「文件管理」中查看本机文件", "你可以在「檔案管理」中查看本機檔案", "You can see the phone's files in File manager"])),
+            None,
+        );
+    }
+    let x = m.w as f32 / 2.0;
+    let sign_cy = m.dp(150.0);
+    c.fill_circle(x, sign_cy, m.dp(30.0), t.pal.card);
+    icons::glyph(&mut c, Icon::Folder, x, sign_cy, m.dp(40.0), t.pal.accent);
+    c.text_center(&f.heading, l.pick(["data 分区已解密", "data 分割區已解密", "The data partition is decrypted"]), x, sign_cy + m.dp(64.0), m.dp(24.0), t.pal.text);
+    c.text_center(
+        &f.body,
+        l.pick(["你可以在「文件管理」中查看本机文件", "你可以在「檔案管理」中查看本機檔案", "You can see the phone's files in File manager"]),
+        x,
+        sign_cy + m.dp(98.0),
+        m.sub_px,
+        t.pal.subtitle,
+    );
+    // The users still closed, each a row that asks for that user's lock.
+    let note = l.pick([
+        "以下用户的文件尚未解锁，其他用户的数据不受影响：",
+        "以下使用者的檔案尚未解鎖，其他使用者的資料不受影響：",
+        "These users' files are still closed; the other users' are not affected:",
+    ]);
+    let mut rows = Vec::new();
+    for (user, keys) in others {
+        let name = if *user == 0 {
+            l.pick(["本机用户", "本機使用者", "This phone's user"]).to_string()
+        } else {
+            tr!(l, "用户 {user}", "使用者 {user}", "User {user}")
+        };
+        let control = l.pick(match keys {
+            Keys::Pattern => ["图案", "圖案", "Pattern"],
+            Keys::Digits => ["密码", "密碼", "PIN"],
+            Keys::Letters => ["密码", "密碼", "Password"],
+        });
+        rows.push(Row::new(name).icon(SLATE, Icon::Lock).trail(Trail::Value(control)));
+    }
+    let top = sign_cy + m.dp(140.0);
+    let y = widgets::footnote(&mut c, t, f, top, note);
+    let list = widgets::list(&mut c, t, f, y, &rows);
+    let mut out: Vec<Hit> = list.rows.iter().zip(others).map(|(&rect, (user, _))| Hit { rect, action: Action::UnlockUser(*user) }).collect();
+    let leave_cy = m.h as f32 - m.dp(64.0);
+    c.text_center(&f.heading, l.pick(["完成", "完成", "Done"]), x, leave_cy, m.row_title_px, t.pal.accent);
+    out.push(Hit { rect: Rect::new(x - m.dp(80.0), leave_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
+    Frame { header: false, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
 }
 
 /// Where the partition stands, under its sign: a line on it, or why it
