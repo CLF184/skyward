@@ -724,7 +724,7 @@ fn open_with_others(cx: &Ctx, mut c: Canvas) -> Frame {
     let rows: Vec<Row> = names
         .iter()
         .zip(&controls)
-        .map(|(name, control)| Row::new(name).icon(SLATE, Icon::Lock).trail(Trail::Value(*control)))
+        .map(|(name, control)| Row::new(name).icon(SLATE, Icon::Lock).trail(Trail::Value(control)))
         .collect();
     let top = sign_cy + m.dp(140.0);
     let y = widgets::footnote(&mut c, t, f, top, note);
