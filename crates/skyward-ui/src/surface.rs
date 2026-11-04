@@ -159,6 +159,7 @@ pub mod kms {
     use std::collections::HashMap;
     use std::fs::{File, OpenOptions};
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     /// How long the display may take to complete a commit.
@@ -644,6 +645,61 @@ pub mod kms {
 
         pub fn describe(&self) -> &str {
             &self.summary
+        }
+
+        /// Write everything the display is, as the card holds it now, to
+        /// `path`: the summary, then every connector, encoder, CRTC and plane
+        /// with all of its properties.
+        ///
+        /// This is [`report`](Self::report) taken while the surface holds the
+        /// card, which nothing else may do: a recovery that is showing its
+        /// pages cannot also run a program that opens the display, so what
+        /// the panel was told is written out from inside it instead.
+        ///
+        /// A file that cannot be written is not the pages' problem, and the
+        /// caller is left to say so or not; this only returns whether it
+        /// worked.
+        pub fn write_state(&self, path: &Path) -> Result<()> {
+            use std::fmt::Write;
+            let mut out = String::new();
+            writeln!(out, "summary: {}", self.summary)?;
+            writeln!(out, "written in: {} order", self.order())?;
+            let res = self.card.resource_handles().context("read KMS resources")?;
+            for &h in res.connectors() {
+                let c = self.card.get_connector(h, true).context("read connector")?;
+                writeln!(out, "\nconnector {} {:?} {:?} modes {}", u32::from(h), c.interface(), c.state(), c.modes().len())?;
+                writeln!(out, "  {}", Props::read(&self.card, h)?.line())?;
+                if is_panel(c.interface()) {
+                    if let Ok((_, blob)) = Props::read(&self.card, h)?.get("mode_properties") {
+                        if let Ok(text) = self.card.get_property_blob(blob) {
+                            writeln!(out, "  mode_properties: {}", String::from_utf8_lossy(&text).replace('\n', " | "))?;
+                        }
+                    }
+                }
+            }
+            for &h in res.crtcs() {
+                let i = self.card.get_crtc(h).context("read CRTC")?;
+                let mode = i.mode().map(|m| format!("{:?} {} Hz", m.name(), m.vrefresh()));
+                writeln!(out, "\ncrtc {} mode {mode:?} fb {:?}", u32::from(h), i.framebuffer().map(u32::from))?;
+                writeln!(out, "  {}", Props::read(&self.card, h)?.line())?;
+            }
+            for p in self.card.plane_handles().context("list planes")? {
+                let i = self.card.get_plane(p).context("read plane")?;
+                let props = Props::read(&self.card, p)?;
+                writeln!(
+                    out,
+                    "\nplane {} type {} crtc {:?} fb {:?} formats {}",
+                    u32::from(p),
+                    props.value("type")?,
+                    i.crtc().map(u32::from),
+                    i.framebuffer().map(u32::from),
+                    i.formats().len()
+                )?;
+                writeln!(out, "  {}", props.line())?;
+                let takes: Vec<String> = i.formats().iter().filter_map(|f| DrmFourcc::try_from(*f).ok().map(|f| f.to_string())).collect();
+                writeln!(out, "  takes [{}]", takes.join(" "))?;
+            }
+            std::fs::write(path, out).with_context(|| format!("write {}", path.display()))
         }
 
         /// The bytes of the buffer the last frame went into, as they sit in

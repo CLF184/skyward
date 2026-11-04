@@ -75,6 +75,10 @@ const HELD_SCREENSHOTS: &str = "/tmp/screenshots";
 const CANVAS_DUMP: &str = "/tmp/frame-canvas.rgba";
 const SCANOUT_DUMP: &str = "/tmp/frame-scanout.rgba";
 
+/// Where what the display was set up as is written: every connector, CRTC
+/// and plane with all of its properties, and the formats each plane takes.
+const DISPLAY_STATE: &str = "/tmp/display-state.txt";
+
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
     path: PathBuf,
@@ -1108,10 +1112,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let fonts = Fonts::load(font, 0, mono)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
     let (w, h) = surface.size();
-    // What the display was set up as goes to the phone's log: the format the
-    // pixels are handed over in, and the planes they go through, which is
-    // what a wrong colour on the panel is read from.
-    skyward_sys::kmsg(&format!("display {}", surface.describe()))?;
+    // What the display was set up as goes to a file, not to the kernel log:
+    // the format the pixels are handed over in, every plane's properties and
+    // the formats it takes, which is what a wrong colour on the panel is read
+    // from. A file takes a whole page of it where a log line takes a line's
+    // worth, and the surface holds the card that nothing else may open while
+    // the pages are showing.
+    //
+    // Nothing about this may end the recovery. What it is for only matters if
+    // the pages are up; a phone that stops showing them so that it can
+    // describe them has lost more than it gained.
+    if let Err(e) = surface.write_state(Path::new(DISPLAY_STATE)) {
+        let _ = skyward_sys::kmsg(&format!("the display's state was not written down: {e:#}"));
+    }
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
