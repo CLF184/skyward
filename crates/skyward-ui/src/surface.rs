@@ -601,23 +601,18 @@ pub mod kms {
             // handed, the colour space it is asked to convert from, and the
             // strips the layer mixers blend. All of it goes in the summary
             // the recovery writes to the kernel log once the surface is up.
-            //
-            // Each plane's formats are named too, the ones the driver will
-            // take for it: which 32-bit RGB orders this display actually
-            // supports is what the choice between them has to be made from.
             let mut told = String::new();
-            for (p, formats, _, _) in &candidates {
-                let props = Props::read(&card, *p).context("read plane properties")?;
+            for &(p, _) in &planes {
+                let props = Props::read(&card, p).context("read plane properties")?;
                 let get = |name: &str| props.value(name).map(|v| v.to_string()).unwrap_or_else(|_| "-".into());
                 let colour = ["COLOR_ENCODING", "COLOR_RANGE", "COLOR_SPACE", "CSC_MATRIX", "ALPHA_ENABLE", "PIXEL_FORMAT"]
                     .iter()
                     .map(|n| format!("{n}={}", get(n)))
                     .collect::<Vec<_>>()
                     .join(",");
-                let takes: Vec<String> = formats.iter().filter_map(|f| DrmFourcc::try_from(*f).ok().map(|f| f.to_string())).collect();
                 told.push_str(&format!(
-                    " plane {} src {}+{} {}x{} crtc {}+{} {}x{} {colour} takes [{}];",
-                    u32::from(*p),
+                    " plane {} src {}+{} {}x{} crtc {}+{} {}x{} {colour};",
+                    u32::from(p),
                     get("SRC_X"),
                     get("SRC_Y"),
                     get("SRC_W"),
@@ -626,7 +621,6 @@ pub mod kms {
                     get("CRTC_Y"),
                     get("CRTC_W"),
                     get("CRTC_H"),
-                    takes.join(" ")
                 ));
             }
             let crtc_props_now = Props::read(&card, crtc).context("read CRTC properties")?;

@@ -1100,7 +1100,8 @@ fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
 
 /// Run the pages. What `request`, read from misc, asks for decides the
 /// first of them; asking for nothing, they start at `start`.
-pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, start: Screen, dump: Option<&Path>) -> Result<()> {    if cfg.display.density == 0 {
+pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, start: Screen, dump: Option<&Path>) -> Result<()> {
+    if cfg.display.density == 0 {
         return Err(anyhow!("{}: [display] density is required to lay out the UI", cfg.device.codename));
     }
     let mut info = skyward_info::collect(cfg)?;
@@ -1110,11 +1111,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // What the display was set up as goes to the phone's log: the format the
     // pixels are handed over in, and the planes they go through, which is
     // what a wrong colour on the panel is read from.
-    //
-    // Said in lines short enough for the kernel log to take, and never at
-    // the cost of the pages: a diagnostic that cannot be written is no
-    // reason to leave the panel dark.
-    skyward_sys::kmsg_long(&format!("display {}", surface.describe()), 400);
+    skyward_sys::kmsg(&format!("display {}", surface.describe()))?;
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
@@ -1435,18 +1432,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 // panel reads. A colour that reaches the panel wrong is read
                 // from these two side by side, which is why they go down
                 // before anything else can change them.
-                //
-                // Nothing here may end the recovery: these files are for a
-                // person with adb, and a phone that stops showing its pages so
-                // that it can write them is worse off than one that does not.
                 if !written {
-                    written = true;
                     let bytes = surface.last_frame_bytes();
-                    let wrote = fs::write(CANVAS_DUMP, &screen.data).and_then(|()| fs::write(SCANOUT_DUMP, bytes));
-                    match wrote {
-                        Ok(()) => skyward_sys::kmsg_long(&format!("the frame handed over: canvas {} bytes, scanout {} bytes, written as {}", screen.data.len(), bytes.len(), surface.order()), 400),
-                        Err(e) => skyward_sys::kmsg_long(&format!("the frame was not written down: {e}"), 400),
-                    }
+                    fs::write(CANVAS_DUMP, &screen.data).with_context(|| format!("write {CANVAS_DUMP}"))?;
+                    fs::write(SCANOUT_DUMP, bytes).with_context(|| format!("write {SCANOUT_DUMP}"))?;
+                    skyward_sys::kmsg(&format!(
+                        "the frame handed over: canvas {} bytes, scanout {} bytes, written as {}, {}",
+                        screen.data.len(),
+                        bytes.len(),
+                        surface.order(),
+                        surface.describe(),
+                    ))?;
+                    written = true;
                 }
                 shown = true;
             }
