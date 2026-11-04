@@ -702,20 +702,30 @@ fn open_with_others(cx: &Ctx, mut c: Canvas) -> Frame {
         "以下使用者的檔案尚未解鎖，其他使用者的資料不受影響：",
         "These users' files are still closed; the other users' are not affected:",
     ]);
-    let mut rows = Vec::new();
-    for (user, keys) in others {
-        let name = if *user == 0 {
-            l.pick(["本机用户", "本機使用者", "This phone's user"]).to_string()
-        } else {
-            tr!(l, "用户 {user}", "使用者 {user}", "User {user}")
-        };
-        let control = l.pick(match keys {
-            Keys::Pattern => ["图案", "圖案", "Pattern"],
-            Keys::Digits => ["密码", "密碼", "PIN"],
-            Keys::Letters => ["密码", "密碼", "Password"],
-        });
-        rows.push(Row::new(&name).icon(SLATE, Icon::Lock).trail(Trail::Value(control)));
-    }
+    // The rows borrow their names, so the names are made first and outlive
+    // them.
+    let names: Vec<String> = others
+        .iter()
+        .map(|(user, _)| match *user {
+            0 => l.pick(["本机用户", "本機使用者", "This phone's user"]).to_string(),
+            user => tr!(l, "用户 {user}", "使用者 {user}", "User {user}"),
+        })
+        .collect();
+    let controls: Vec<&'static str> = others
+        .iter()
+        .map(|(_, keys)| {
+            l.pick(match *keys {
+                Keys::Pattern => ["图案", "圖案", "Pattern"],
+                Keys::Digits => ["密码", "密碼", "PIN"],
+                Keys::Letters => ["密码", "密碼", "Password"],
+            })
+        })
+        .collect();
+    let rows: Vec<Row> = names
+        .iter()
+        .zip(&controls)
+        .map(|(name, control)| Row::new(name).icon(SLATE, Icon::Lock).trail(Trail::Value(*control)))
+        .collect();
     let top = sign_cy + m.dp(140.0);
     let y = widgets::footnote(&mut c, t, f, top, note);
     let list = widgets::list(&mut c, t, f, y, &rows);
