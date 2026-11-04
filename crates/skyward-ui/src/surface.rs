@@ -847,6 +847,50 @@ pub mod kms {
         }
     }
 
+    /// The colours the pattern is made of, in the order they are laid down
+    /// the screen, each with what it is.
+    ///
+    /// Pure red, green and blue first: a channel that arrives somewhere else
+    /// shows up as one of the mixed colours below, and the pair it turns into
+    /// says which way round the channels went.
+    pub const PATTERN: [(crate::color::Rgba, &str); 8] = [
+        (crate::color::Rgba::rgb(255, 0, 0), "red 255,0,0"),
+        (crate::color::Rgba::rgb(0, 255, 0), "green 0,255,0"),
+        (crate::color::Rgba::rgb(0, 0, 255), "blue 0,0,255"),
+        (crate::color::Rgba::rgb(255, 255, 0), "yellow 255,255,0"),
+        (crate::color::Rgba::rgb(255, 0, 255), "magenta 255,0,255"),
+        (crate::color::Rgba::rgb(0, 255, 255), "cyan 0,255,255"),
+        (crate::color::Rgba::rgb(255, 255, 255), "white 255,255,255"),
+        (crate::color::Rgba::rgb(0, 0, 0), "black 0,0,0"),
+    ];
+
+    /// Fill the panel with [`PATTERN`] and hold it for `hold`.
+    ///
+    /// Each colour takes a band of the screen, in the order listed, with a
+    /// grey gap between them so that where one ends is plain in a photograph.
+    /// What each band is meant to be goes to `say`, so that the picture and
+    /// the log together say what the glass made of a known value.
+    pub fn show_pattern(card: &str, hold: std::time::Duration, say: &dyn Fn(&str) -> Result<()>) -> Result<()> {
+        let mut surface = KmsSurface::open(card)?;
+        let (w, h) = surface.size();
+        let mut canvas = Canvas::new(w, h);
+        let band = h / PATTERN.len() as u32;
+        for (i, (colour, what)) in PATTERN.iter().enumerate() {
+            let top = band * i as u32;
+            let height = if i + 1 == PATTERN.len() { h - top } else { band - 4 };
+            canvas.fill_rect(0.0, top as f32, w as f32, height as f32, *colour);
+            if i + 1 != PATTERN.len() {
+                canvas.fill_rect(0.0, (top + height) as f32, w as f32, 4.0, crate::color::Rgba::rgb(96, 96, 96));
+            }
+            say(&format!("pattern band {i}, rows {top}..{} is {what}", top + height))?;
+        }
+        surface.present(&canvas)?;
+        surface.settle()?;
+        say(&format!("the pattern is on the panel for {} s", hold.as_secs()))?;
+        std::thread::sleep(hold);
+        Ok(())
+    }
+
     impl Surface for KmsSurface {
         fn size(&self) -> (u32, u32) {
             (self.w, self.h)

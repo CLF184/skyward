@@ -119,6 +119,21 @@ enum Cmd {
         #[arg(long, default_value = "/dev/dri/card0")]
         card: String,
     },
+    /// Show a pattern of known colours on the panel and hold it there, so
+    /// that what the glass makes of each one can be read off a photograph.
+    ///
+    /// Six squares of pure colour down the screen, each named in the log by
+    /// the value it is meant to be, with black and white above and below to
+    /// anchor the rest: a colour that comes out wrong is then identified by
+    /// which square it came from rather than guessed at.
+    #[cfg(target_os = "android")]
+    Pattern {
+        #[arg(long, default_value = "/dev/dri/card0")]
+        card: String,
+        /// How long to leave it on the panel, in seconds.
+        #[arg(long, default_value_t = 120)]
+        seconds: u64,
+    },
     /// Play the vibration motor's click once, saying how strongly and for
     /// how long.
     #[cfg(target_os = "android")]
@@ -275,6 +290,10 @@ fn main() -> Result<()> {
             print!("{}", skyward_ui::surface::kms::report(&card)?);
             Ok(())
         }
+        #[cfg(target_os = "android")]
+        Cmd::Pattern { card, seconds } => skyward_ui::surface::kms::show_pattern(&card, std::time::Duration::from_secs(seconds), &|said| {
+            skyward_sys::kmsg(said)
+        }),
         #[cfg(target_os = "android")]
         Cmd::Haptic { config, position } => {
             let haptics = DeviceConfig::load(&config)?.haptics.context("the configuration describes no vibration motor")?;
