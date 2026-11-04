@@ -52,18 +52,19 @@ pub fn askable(waiting: &[Waiting]) -> Vec<u32> {
     users
 }
 
-/// The number of the user a folder belongs to, where it is one of the
-/// phone's own user areas: `/data/user/<n>`, where each user's own files
-/// live, and `/data/media/<n>`, where a user's shared storage does. `None`
-/// for every other folder.
+/// The number of the user a folder belongs to, where that folder is one of
+/// the phone's own user areas itself: `/data/user/<n>`, where a user's own
+/// files live, and `/data/media/<n>`, where a user's shared storage does.
+/// `None` for a folder inside one of those, which reads through the same
+/// key and is not the area itself, and for every other folder.
 pub fn user_of(path: &std::path::Path) -> Option<u32> {
-    let mut parts = path.components().skip(1);
-    let first = parts.next()?;
-    let area = parts.next()?.as_os_str().to_str()?;
+    let parts: Vec<_> = path.components().skip(1).collect();
+    let [first, area, number] = parts.as_slice() else { return None };
+    let area = area.as_os_str().to_str()?;
     if first.as_os_str() != "data" || (area != "user" && area != "media") {
         return None;
     }
-    parts.next()?.as_os_str().to_str()?.parse().ok()
+    number.as_os_str().to_str()?.parse().ok()
 }
 
 #[cfg(test)]
