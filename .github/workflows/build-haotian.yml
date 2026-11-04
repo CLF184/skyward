@@ -28,6 +28,23 @@ env:
   DEVICE: haotian
 
 jobs:
+  test:
+    name: Test on the computer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      # What can be read and decided on a computer is tested here: the
+      # readers of what the phone keeps, among them which of a user's blobs
+      # to open. The phone's own code is not built for this host.
+      - name: Run the tests
+        run: cargo test --workspace --locked
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
   build:
     name: Build the recovery
     runs-on: ubuntu-24.04
