@@ -81,7 +81,12 @@ const DISPLAY_STATE: &str = "/tmp/display-state.txt";
 
 /// Its being there asks the recovery to show a pattern of known colours over
 /// its pages once, on the way up, and then go back to the pages.
-const SHOW_PATTERN: &str = "/tmp/show-pattern";
+///
+/// Looked for in more than one place: /tmp is memory and is gone by the time
+/// the pages come back after a start, while the data partition outlives it
+/// but is not always open. Whichever is there is taken and removed, so the
+/// next start shows the pages again.
+const SHOW_PATTERN: [&str; 3] = ["/tmp/show-pattern", "/data/local/tmp/show-pattern", "/sdcard/show-pattern"];
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -1171,6 +1176,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     if let Err(e) = surface.write_state(Path::new(DISPLAY_STATE)) {
         let _ = skyward_sys::kmsg(&format!("the display's state was not written down: {e:#}"));
     }
+    // Whether the request was seen, and where: a pattern that does not come
+    // up is told apart from a request that was never read this way.
+    let wanted_at = SHOW_PATTERN.iter().find(|p| Path::new(p).exists()).copied();
+    let _ = skyward_sys::kmsg(&format!("the pattern was asked for at {wanted_at:?} (looked in {SHOW_PATTERN:?})"));
     // A pattern of known colours over the pages, once, where a file asks for
     // one: what the panel does with a value is read off a photograph of
     // bands whose values are known, rather than inferred from a page whose
@@ -1180,8 +1189,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // may open the display while the pages hold it: a program that tried
     // would be refused, and the recovery stopped to make room is a recovery
     // adb is no longer on.
-    if Path::new(SHOW_PATTERN).exists() {
-        let _ = std::fs::remove_file(SHOW_PATTERN);
+    if let Some(at) = SHOW_PATTERN.iter().find(|p| Path::new(p).exists()) {
+        let _ = std::fs::remove_file(at);
         show_pattern(&mut surface, &|said| {
             let _ = skyward_sys::kmsg(said);
         });
