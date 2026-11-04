@@ -635,13 +635,8 @@ pub mod kms {
                 .map(|n| format!("{n}={}", crtc_props_now.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
                 .collect::<Vec<_>>()
                 .join(",");
-            // Everything the connector carries, not only the properties asked
-            // for: the mode is DSC compressed and two planes drive it, and a
-            // colour that comes out wrong is read from whatever the driver
-            // offers to describe the compression with.
-            let dsc_named = conn_props.line();
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, crtc {crtc_colour};{told}\n  connector properties: {dsc_named}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, crtc {crtc_colour};{told}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
