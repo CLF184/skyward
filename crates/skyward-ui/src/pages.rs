@@ -714,7 +714,7 @@ fn open_with_others(cx: &Ctx, mut c: Canvas) -> Frame {
             Keys::Digits => ["密码", "密碼", "PIN"],
             Keys::Letters => ["密码", "密碼", "Password"],
         });
-        rows.push(Row::new(name).icon(SLATE, Icon::Lock).trail(Trail::Value(control)));
+        rows.push(Row::new(&name).icon(SLATE, Icon::Lock).trail(Trail::Value(control)));
     }
     let top = sign_cy + m.dp(140.0);
     let y = widgets::footnote(&mut c, t, f, top, note);
