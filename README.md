@@ -14,9 +14,12 @@ Skyward is a recovery written in Rust, from scratch.
 
 ## Features
 
-- Decrypt the data partition
+### Implemented
+
+- Decrypt the data partition with the screen lock's credential
 - Install zips, system update packages and partition images, from internal storage, a USB drive or adb sideload
 - Online system updates
+- Virtual A/B updates: read where an update's snapshots stand, map the partitions through them, and merge them back into the partitions they snapshot, as the system's own recovery does
 - Backup and restore
 - Wipe data and factory reset
 - Mount partitions, repair and format filesystems
@@ -25,6 +28,14 @@ Skyward is a recovery written in Rust, from scratch.
 - MTP file transfer, adb and fastbootd
 - Reboot to system, recovery, fastboot, bootloader or EDL, and switch slots
 - Light and dark themes; Simplified Chinese, Traditional Chinese and English
+
+### Not implemented
+
+- Updates whose snapshots are compressed and served by snapuserd: this recovery maps and merges kernel snapshots only, so an update of that kind merges in the system, once it starts
+- Incremental update packages, which would ask the recovery to make snapshots of its own on a Virtual A/B phone
+- Update packages for phones without A/B slots
+- Vibration on the Xiaomi 15 Pro, whose motor's driver asks the kernel for a power state a recovery has not set up; see the note on that phone below
+- On the phones under construction below, decryption of the data partition, which has not been brought up on them yet
 
 ## Notes on the Xiaomi 15 Pro
 
