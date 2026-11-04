@@ -55,6 +55,11 @@ pub(crate) fn order_of(fourcc: u32) -> Order {
 
 /// The 32-bit RGB formats a scanout buffer may be made in, the ones whose
 /// pixels the canvas reaches by turning nothing or two bytes round.
+///
+/// Which of them to use is the driver's to say: it lists the formats a plane
+/// takes in the order it prefers them, and the choice is made from that list
+/// rather than from this one. This says only which of those this code knows
+/// how to write.
 #[cfg(any(target_os = "android", test))]
 pub(crate) const SCANOUT: [u32; 4] = [0x3432_4258, 0x3432_4241, 0x3432_5258, 0x3432_5241];
 
@@ -567,9 +572,16 @@ pub mod kms {
             }
             candidates.truncate(strips);
 
-            let fourcc = SCANOUT
-                .into_iter()
-                .find(|f| candidates.iter().all(|c| c.1.contains(f)))
+            // The planes' own order is the preference: take the first 32-bit
+            // RGB format, in the order the driver lists them, that every
+            // plane of the mode will take. A haotian puts AR24 first and
+            // Xbgr8888 last, and a buffer in the one it wanted least is what
+            // came out with its colours mangled.
+            let fourcc = candidates[0]
+                .1
+                .iter()
+                .copied()
+                .find(|f| SCANOUT.contains(f) && candidates.iter().all(|c| c.1.contains(f)))
                 .ok_or_else(|| anyhow!("the primary planes share none of the 32-bit RGB formats"))?;
             let order = order_of(fourcc);
             let fourcc = DrmFourcc::try_from(fourcc).expect("the formats chosen are ones it names");
