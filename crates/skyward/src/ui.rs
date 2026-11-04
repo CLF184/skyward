@@ -72,12 +72,15 @@ const HELD_SCREENSHOTS: &str = "/tmp/screenshots";
 /// canvas as the pages drew it, and the buffer as the panel reads it. Both
 /// are raw pixels of the panel's size, four bytes each, for a colour that
 /// reaches the panel wrong to be read off.
-const CANVAS_DUMP: &str = "/tmp/frame-canvas.rgba";
-const SCANOUT_DUMP: &str = "/tmp/frame-scanout.rgba";
+///
+/// On persist, which is a partition: /tmp and /sdcard are memory in a
+/// recovery, so a picture left there is gone by the time it can be pulled.
+const CANVAS_DUMP: &str = "/mnt/vendor/persist/frame-canvas.rgba";
+const SCANOUT_DUMP: &str = "/mnt/vendor/persist/frame-scanout.rgba";
 
 /// Where what the display was set up as is written: every connector, CRTC
 /// and plane with all of its properties, and the formats each plane takes.
-const DISPLAY_STATE: &str = "/tmp/display-state.txt";
+const DISPLAY_STATE: &str = "/mnt/vendor/persist/display-state.txt";
 
 /// Its being there asks the recovery to show a pattern of known colours over
 /// its pages once, on the way up, and then go back to the pages.
@@ -94,6 +97,11 @@ const SHOW_PATTERN: [&str; 5] = [
     "/persist/show-pattern",
     "/data/local/tmp/show-pattern",
 ];
+
+/// Its being there asks for the frame being shown to be written down, on the
+/// next one: the canvas as the page drew it and the buffer as the panel reads
+/// it, taken while the pages are running rather than at the first frame.
+const LIVE_DUMP: [&str; 3] = ["/mnt/vendor/persist/dump-frame", "/persist/dump-frame", "/tmp/dump-frame"];
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
@@ -1516,6 +1524,27 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
                 if let Some(path) = dump {
                     fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
+                }
+                // A frame taken down while the pages are running, on request:
+                // the canvas as the page drew it, the buffer as the panel
+                // reads it, and the description of what the panel was told.
+                // Asked for through a file so that it can be done at any
+                // moment rather than only at the first frame, which is what
+                // tells a colour that is wrong from the start apart from one
+                // that goes wrong later.
+                if LIVE_DUMP.iter().any(|p| Path::new(p).exists()) {
+                    for p in LIVE_DUMP.iter().filter(|p| Path::new(p).exists()) {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    let bytes = surface.last_frame_bytes();
+                    let same = bytes.len() >= screen.data.len() && bytes[..screen.data.len()] == screen.data[..];
+                    let _ = fs::write(CANVAS_DUMP, &screen.data);
+                    let _ = fs::write(SCANOUT_DUMP, bytes);
+                    let _ = skyward_sys::kmsg(&format!(
+                        "the frame taken down while showing {:?}: canvas and scanout {}",
+                        app.screen(),
+                        if same { "are the same bytes" } else { "differ" }
+                    ));
                 }
                 // Once, the picture on both sides of the hand-over: the
                 // canvas holds what the pages drew, the buffer holds what the
