@@ -6784,22 +6784,30 @@ mod tests {
         assert_eq!((none.slot, none.temp), (None, None), "a phone without slots or a fuel gauge");
     }
 
-    /// A screen the home page's rows fit on with a little room to spare.
-    const SNUG: u32 = 3000;
+    /// A screen as tall as the home page's rows need, with a little room to
+    /// spare. Measured from the page rather than written down, so that a row
+    /// added to the page moves it with them.
+    fn snug(f: &Fonts, i: &DeviceInfo) -> u32 {
+        let mut app = App::new(Screen::Home, W, H * 2, PPD);
+        let fr = app.frame(f, i);
+        let last = fr.hits.iter().map(|h| h.rect.y + h.rect.h).fold(0.0f32, f32::max);
+        (last + 8.0).ceil() as u32
+    }
 
     #[test]
     fn a_home_page_grown_by_an_update_notice_scrolls_down_to_its_last_row() {
         let f = fonts();
         let plain = info();
-        let mut app = App::new(Screen::Home, W, SNUG, PPD);
+        let snug = snug(&f, &plain);
+        let mut app = App::new(Screen::Home, W, snug, PPD);
         let fr = app.frame(&f, &plain);
         let reboot = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("a reboot row").rect;
-        assert!(reboot.y + reboot.h <= SNUG as f32, "without the notice the rows fit the screen");
+        assert!(reboot.y + reboot.h <= snug as f32, "without the notice the rows fit the screen");
         let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
-        let mut app = App::new(Screen::Home, W, SNUG, PPD);
+        let mut app = App::new(Screen::Home, W, snug, PPD);
         let fr = app.frame(&f, &i);
         let reboot = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("a reboot row").rect;
-        assert!(reboot.y + reboot.h > SNUG as f32, "the notice pushes the last row below the screen");
+        assert!(reboot.y + reboot.h > snug as f32, "the notice pushes the last row below the screen");
         assert!(reboot.y + reboot.h <= fr.canvas.h as f32, "the page is drawn down to it");
         app.touch(Touch::Down(700.0, 2800.0), &f, 0);
         app.touch(Touch::Move(700.0, 2000.0), &f, 0);
@@ -6809,7 +6817,7 @@ mod tests {
             app.tick(ms);
         }
         let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
-        assert!(y < SNUG as f32, "scrolled up into view");
+        assert!(y < snug as f32, "scrolled up into view");
         tap_at(&mut app, &f, &i, Action::Open(Screen::Reboot), 3000);
         assert_eq!(app.screen(), Screen::Reboot);
     }
@@ -8044,16 +8052,17 @@ mod tests {
     #[test]
     fn the_keys_reach_the_last_row_of_a_home_page_grown_by_an_update_notice() {
         let f = fonts();
+        let snug = snug(&f, &info());
         let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
-        let mut app = App::new(Screen::Home, W, SNUG, PPD);
+        let mut app = App::new(Screen::Home, W, snug, PPD);
         let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
-        assert!(y > SNUG as f32, "below the screen to start with");
+        assert!(y > snug as f32, "below the screen to start with");
         light_on(&mut app, &f, &i, Stop::Hit(Action::Open(Screen::Reboot)));
         for ms in (0..3000).step_by(8) {
             app.tick(ms);
         }
         let (_, y) = spot(&mut app, &f, &i, Action::Open(Screen::Reboot));
-        assert!(y < SNUG as f32, "the page scrolled the lit row into view");
+        assert!(y < snug as f32, "the page scrolled the lit row into view");
         press(&mut app, Key::Power, 3000);
         assert_eq!(app.screen(), Screen::Reboot);
     }
