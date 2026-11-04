@@ -611,6 +611,30 @@ pub mod kms {
         pub fn describe(&self) -> &str {
             &self.summary
         }
+
+        /// The bytes of the buffer the last frame went into, as they sit in
+        /// the scanout memory.
+        ///
+        /// These are what the display controller reads, not what the canvas
+        /// holds: reading them back is how the order the bytes were written
+        /// in is checked against the order the panel was told to read. The
+        /// three buffers are taken in turn, so `back` names the one the next
+        /// frame will go into; the frame just shown is the one before it.
+        pub fn last_frame_bytes(&self) -> &[u8] {
+            let shown = (self.back + self.bufs.len() - 1) % self.bufs.len();
+            let buf = &self.bufs[shown];
+            unsafe { std::slice::from_raw_parts(buf.map, buf.len) }
+        }
+
+        /// The order the canvas's bytes are written in for this surface, as
+        /// its name: `rgba` when the buffer takes them as they are, `bgra`
+        /// when red and blue are turned round on the way in.
+        pub fn order(&self) -> &'static str {
+            match self.order {
+                Order::Rgba => "rgba",
+                Order::Bgra => "bgra",
+            }
+        }
     }
 
     impl Drop for KmsSurface {

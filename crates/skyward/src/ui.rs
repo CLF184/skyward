@@ -68,6 +68,13 @@ const STORAGE_LOGS: &str = "Skyward/logs";
 const SCREENSHOTS: &str = "DCIM/Screenshots";
 const HELD_SCREENSHOTS: &str = "/tmp/screenshots";
 
+/// Where the first frame is written on both sides of the hand-over: the
+/// canvas as the pages drew it, and the buffer as the panel reads it. Both
+/// are raw pixels of the panel's size, four bytes each, for a colour that
+/// reaches the panel wrong to be read off.
+const CANVAS_DUMP: &str = "/tmp/frame-canvas.rgba";
+const SCANOUT_DUMP: &str = "/tmp/frame-scanout.rgba";
+
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
     path: PathBuf,
@@ -1108,6 +1115,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
+    // The first frame goes to disk on both sides of the hand-over, once: the
+    // canvas as the pages drew it and the buffer as the panel reads it.
+    let mut written = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
     // Neither the motor nor the backlight is what shows the pages: a phone
@@ -1416,6 +1426,24 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
                 if let Some(path) = dump {
                     fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
+                }
+                // Once, the picture on both sides of the hand-over: the
+                // canvas holds what the pages drew, the buffer holds what the
+                // panel reads. A colour that reaches the panel wrong is read
+                // from these two side by side, which is why they go down
+                // before anything else can change them.
+                if !written {
+                    let bytes = surface.last_frame_bytes();
+                    fs::write(CANVAS_DUMP, &screen.data).with_context(|| format!("write {CANVAS_DUMP}"))?;
+                    fs::write(SCANOUT_DUMP, bytes).with_context(|| format!("write {SCANOUT_DUMP}"))?;
+                    skyward_sys::kmsg(&format!(
+                        "the frame handed over: canvas {} bytes, scanout {} bytes, written as {}, {}",
+                        screen.data.len(),
+                        bytes.len(),
+                        surface.order(),
+                        surface.describe(),
+                    ))?;
+                    written = true;
                 }
                 shown = true;
             }
