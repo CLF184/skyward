@@ -596,14 +596,47 @@ pub mod kms {
             }
 
             let ids: Vec<u32> = planes.iter().map(|p| u32::from(p.0)).collect();
+            // What the panel was told, not merely how it was found: a colour
+            // that reaches it wrong is read from the format each plane is
+            // handed, the colour space it is asked to convert from, and the
+            // strips the layer mixers blend. All of it goes in the summary
+            // the recovery writes to the kernel log once the surface is up.
+            let mut told = String::new();
+            for &(p, _) in &planes {
+                let props = Props::read(&card, p).context("read plane properties")?;
+                let get = |name: &str| props.value(name).map(|v| v.to_string()).unwrap_or_else(|_| "-".into());
+                let colour = ["COLOR_ENCODING", "COLOR_RANGE", "COLOR_SPACE", "CSC_MATRIX", "ALPHA_ENABLE", "PIXEL_FORMAT"]
+                    .iter()
+                    .map(|n| format!("{n}={}", get(n)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                told.push_str(&format!(
+                    " plane {} src {}+{} {}x{} crtc {}+{} {}x{} {colour};",
+                    u32::from(p),
+                    get("SRC_X"),
+                    get("SRC_Y"),
+                    get("SRC_W"),
+                    get("SRC_H"),
+                    get("CRTC_X"),
+                    get("CRTC_Y"),
+                    get("CRTC_W"),
+                    get("CRTC_H"),
+                ));
+            }
+            let crtc_colour = ["GAMMA_LUT", "DEGAMMA_LUT", "CTM", "COLOR_ENCODING", "COLOR_RANGE"]
+                .iter()
+                .map(|n| format!("{n}={}", Props::read(&card, crtc)?.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
+                .collect::<Vec<_>>()
+                .join(",");
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, crtc {crtc_colour};{told}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
                 mode.vrefresh(),
                 u32::from(crtc),
-                fourcc
+                fourcc,
+                layout.dsc,
             );
             Ok(KmsSurface { card, bufs, back: 1, flipping: false, planes, w, h, order, summary })
         }
