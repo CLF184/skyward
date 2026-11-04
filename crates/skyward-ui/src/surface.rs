@@ -383,10 +383,6 @@ pub mod kms {
         let handle = info.buffer().ok_or_else(|| anyhow!("no buffer handle for the framebuffer; capturing needs root"))?;
         let (w, h) = info.size();
         let pitch = info.pitch() as usize;
-        // The scanout buffer holds its pixels in the order its format names,
-        // which is not the canvas's own; a picture taken without turning them
-        // back reads with red and blue the wrong way round.
-        let order = order_of(info.pixel_format() as u32);
         let map = drm_ffi::mode::dumbbuffer::map(card.as_fd(), handle.into(), 0, 0).context("map the framebuffer")?;
         let len = pitch * h as usize;
         let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, card.as_fd().as_raw_fd(), map.offset as libc::off_t) };
@@ -397,16 +393,7 @@ pub mod kms {
         let mut c = Canvas::new(w, h);
         let row = w as usize * 4;
         for y in 0..h as usize {
-            let line = &src[y * pitch..y * pitch + row];
-            let out = &mut c.data[y * row..(y + 1) * row];
-            match order {
-                Order::Rgba => out.copy_from_slice(line),
-                Order::Bgra => {
-                    for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(line.as_chunks::<4>().0) {
-                        *o = [s[2], s[1], s[0], s[3]];
-                    }
-                }
-            }
+            c.data[y * row..(y + 1) * row].copy_from_slice(&src[y * pitch..y * pitch + row]);
         }
         unsafe { libc::munmap(ptr, len) };
         Ok(c)
