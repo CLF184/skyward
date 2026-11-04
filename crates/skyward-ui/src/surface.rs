@@ -56,10 +56,8 @@ pub(crate) fn order_of(fourcc: u32) -> Order {
 /// The 32-bit RGB formats a scanout buffer may be made in, the ones whose
 /// pixels the canvas reaches by turning nothing or two bytes round.
 ///
-/// Which of them to use is the driver's to say: it lists the formats a plane
-/// takes in the order it prefers them, and the choice is made from that list
-/// rather than from this one. This says only which of those this code knows
-/// how to write.
+/// `XB24` first: it is the order the canvas already holds its bytes in, and
+/// what a haotian's own recovery drives its panel with.
 #[cfg(any(target_os = "android", test))]
 pub(crate) const SCANOUT: [u32; 4] = [0x3432_4258, 0x3432_4241, 0x3432_5258, 0x3432_5241];
 
@@ -288,6 +286,30 @@ pub mod kms {
             _ => None,
         }
         .ok_or_else(|| anyhow!("{} offers no {choice}", info.name().to_string_lossy()))
+    }
+
+    /// The choice a plane's pixels are to be read as, and the property it
+    /// belongs to.
+    ///
+    /// A panel driven over DSI is usually described to the display controller
+    /// as YCbCr in the compressed sense -- the controller converts, the panel
+    /// decodes -- and a plane left at the driver's own default hands the
+    /// pixels over unconverted. What this phone's own recovery asks for is
+    /// BT.601 YCbCr, which is also what the kernel puts on a plane nobody has
+    /// spoken to, so that is what is asked for here.
+    fn colour_encoding(card: &Card, props: &Props) -> Option<(property::Handle, u64)> {
+        let (id, _) = props.get("COLOR_ENCODING").ok()?;
+        let choice = enum_choice(card, id, &["ITU-R BT.601 YCbCr", "BT601_YCC", "yuv444_8bit"], 0).ok()?;
+        Some((id, choice))
+    }
+
+    /// The choice of range a plane's pixels are to be read in, and the
+    /// property it belongs to: the limited one, as Android's own recovery
+    /// asks for, which is what a video range means to a panel.
+    fn colour_range(card: &Card, props: &Props) -> Option<(property::Handle, u64)> {
+        let (id, _) = props.get("COLOR_RANGE").ok()?;
+        let choice = enum_choice(card, id, &["YCbCr limited range", "Limited", "limited"], 1).ok()?;
+        Some((id, choice))
     }
 
     /// The choice an enum property names `choice`, or the one sitting at
@@ -545,19 +567,13 @@ pub mod kms {
                 }
                 Err(_) => SdeMode { mixers: 1, dsc: false, bpp: None },
             };
-            // One plane across the whole width, as Android's compositor hands
-            // a full-screen layer over. The mode is driven by two layer
-            // mixers, and splitting the picture between them is what a
-            // compositor does for two layers; one layer needs one plane, and
-            // the hardware splits it between the mixers itself when the mode
-            // is picked with both.
-            //
-            // Driving two strips by hand is what this did, and the colours
-            // came out wrong with the buffer written exactly right: a
-            // compressed mode split that way is not the same picture as one
-            // the controller splits.
-            let strips: usize = 1;
-            let _ = layout.mixers;
+            // One plane per layer mixer, each covering its own strip, which is
+            // how this phone's own recovery drives the same mode: two planes,
+            // 720 wide each, one at x=0 and one at x=720.
+            let strips = layout.mixers as usize;
+            if w % layout.mixers != 0 {
+                return Err(anyhow!("{w} pixels do not split into {strips} strips"));
+            }
 
             // Primary planes that can drive the CRTC, those already on it
             // first so the boot splash's planes are reused; planes on the
@@ -581,16 +597,11 @@ pub mod kms {
             }
             candidates.truncate(strips);
 
-            // The planes' own order is the preference: take the first 32-bit
-            // RGB format, in the order the driver lists them, that every
-            // plane of the mode will take. A haotian puts AR24 first and
-            // Xbgr8888 last, and a buffer in the one it wanted least is what
-            // came out with its colours mangled.
-            let fourcc = candidates[0]
-                .1
-                .iter()
-                .copied()
-                .find(|f| SCANOUT.contains(f) && candidates.iter().all(|c| c.1.contains(f)))
+            // `XB24` first, which is the order the canvas already holds its
+            // bytes in -- and what this phone's own recovery hands its panel.
+            let fourcc = SCANOUT
+                .into_iter()
+                .find(|f| candidates.iter().all(|c| c.1.contains(f)))
                 .ok_or_else(|| anyhow!("the primary planes share none of the 32-bit RGB formats"))?;
             let order = order_of(fourcc);
             let fourcc = DrmFourcc::try_from(fourcc).expect("the formats chosen are ones it names");
@@ -656,11 +667,10 @@ pub mod kms {
                 req.add_property(other, props.handle("FB_ID")?, property::Value::Framebuffer(None));
                 req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
             }
+            let strip = w / layout.mixers;
             let mut planes = Vec::new();
-            for (i, (plane, _, props, _)) in candidates.iter().take(strips).enumerate() {
-                let _ = i;
-                let x: u32 = 0;
-                let strip = w;
+            for (i, (plane, _, props, _)) in candidates.iter().enumerate() {
+                let x = strip * i as u32;
                 let fb_prop = props.handle("FB_ID")?;
                 req.add_property(*plane, fb_prop, property::Value::Framebuffer(Some(bufs[0].fb)));
                 req.add_property(*plane, props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
@@ -672,6 +682,17 @@ pub mod kms {
                 req.add_property(*plane, props.handle("CRTC_Y")?, property::Value::SignedRange(0));
                 req.add_property(*plane, props.handle("CRTC_W")?, property::Value::UnsignedRange(strip as u64));
                 req.add_property(*plane, props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
+                // How the panel is told to read the pixels: this phone's own
+                // recovery drives it as ITU-R BT.601 YCbCr in its limited
+                // range, and a plane left at the driver's default is what
+                // showed blue as magenta. Said as the connector's own
+                // enumerations, and only where the connector offers them.
+                if let Some((what, choice)) = colour_encoding(&card, props) {
+                    req.add_property(*plane, what, property::Value::UnsignedRange(choice));
+                }
+                if let Some((what, choice)) = colour_range(&card, props) {
+                    req.add_property(*plane, what, property::Value::UnsignedRange(choice));
+                }
                 planes.push((*plane, fb_prop));
             }
             // The panel comes up in its preferred mode, then switches to the
