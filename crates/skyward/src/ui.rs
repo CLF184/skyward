@@ -73,14 +73,20 @@ const HELD_SCREENSHOTS: &str = "/tmp/screenshots";
 /// are raw pixels of the panel's size, four bytes each, for a colour that
 /// reaches the panel wrong to be read off.
 ///
-/// On persist, which is a partition: /tmp and /sdcard are memory in a
-/// recovery, so a picture left there is gone by the time it can be pulled.
-const CANVAS_DUMP: &str = "/mnt/vendor/persist/frame-canvas.rgba";
-const SCANOUT_DUMP: &str = "/mnt/vendor/persist/frame-scanout.rgba";
+/// In memory, not on persist: a frame is eighteen megabytes and persist is a
+/// few, so writing one there fills the partition and fails. What this is for
+/// wants the phone still up; being pulled is the reader's business, and adb
+/// can pull from memory as readily as from a partition.
+const CANVAS_DUMP: &str = "/tmp/frame-canvas.rgba";
+const SCANOUT_DUMP: &str = "/tmp/frame-scanout.rgba";
 
 /// Where what the display was set up as is written: every connector, CRTC
 /// and plane with all of its properties, and the formats each plane takes.
-const DISPLAY_STATE: &str = "/mnt/vendor/persist/display-state.txt";
+///
+/// In memory with the frames, and for the same reason: persist is small
+/// enough that a filled one refuses even this, and the description is worth
+/// having only while the recovery that wrote it is up.
+const DISPLAY_STATE: &str = "/tmp/display-state.txt";
 
 /// Its being there asks the recovery to show a pattern of known colours over
 /// its pages once, on the way up, and then go back to the pages.
@@ -1551,18 +1557,32 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 // panel reads. A colour that reaches the panel wrong is read
                 // from these two side by side, which is why they go down
                 // before anything else can change them.
+                //
+                // Nothing here may end the recovery. Persist is small -- a
+                // few megabytes -- and a frame is eighteen apiece: writing
+                // both of them there fills it and fails, and a recovery that
+                // stopped because it could not write a diagnostic is a
+                // recovery that never showed its pages at all. What cannot be
+                // written is said and let go.
                 if !written {
-                    let bytes = surface.last_frame_bytes();
-                    fs::write(CANVAS_DUMP, &screen.data).with_context(|| format!("write {CANVAS_DUMP}"))?;
-                    fs::write(SCANOUT_DUMP, bytes).with_context(|| format!("write {SCANOUT_DUMP}"))?;
-                    skyward_sys::kmsg(&format!(
-                        "the frame handed over: canvas {} bytes, scanout {} bytes, written as {}, {}",
-                        screen.data.len(),
-                        bytes.len(),
-                        surface.order(),
-                        surface.describe(),
-                    ))?;
                     written = true;
+                    let bytes = surface.last_frame_bytes();
+                    let wrote = fs::write(CANVAS_DUMP, &screen.data).and_then(|()| fs::write(SCANOUT_DUMP, bytes));
+                    match &wrote {
+                        Ok(()) => {
+                            let _ = skyward_sys::kmsg(&format!(
+                                "the frame handed over: canvas {} bytes, scanout {} bytes, written as {}",
+                                screen.data.len(),
+                                bytes.len(),
+                                surface.order(),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = skyward_sys::kmsg(&format!("the frame was not written down: {e}"));
+                            let _ = fs::remove_file(CANVAS_DUMP);
+                            let _ = fs::remove_file(SCANOUT_DUMP);
+                        }
+                    }
                 }
                 shown = true;
             }
