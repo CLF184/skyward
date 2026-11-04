@@ -25,6 +25,11 @@ pub fn set_mtp(on: bool) {
     MTP.store(on, Ordering::Relaxed);
 }
 
+/// The functions a configuration names, in the order it names them.
+fn functions_of(config: &str) -> Vec<&str> {
+    config.split(',').filter(|f| !f.is_empty()).collect()
+}
+
 /// Ask init for `config` and wait until it is in place. Going to "none"
 /// also waits for adbd to be gone, so its function is free.
 pub fn set(config: &str, timeout: Duration) -> Result<()> {
@@ -49,11 +54,21 @@ pub fn set(config: &str, timeout: Duration) -> Result<()> {
 ///
 /// A port already serving `config` is left alone: going through "none" for
 /// nothing stops adbd, and every adb session the computer had open dies with
-/// it. Turning file transfer on or off asks for the port's resting
-/// configuration either way, which is often the one it is already on.
+/// it. The same goes for one that only gains a function: `adb` and
+/// `mtp,adb` both serve the adb function, so turning file transfer on adds a
+/// function beside it rather than replacing what is there, and init is asked
+/// for the new configuration directly. Only a function that has to come off
+/// needs the port taken down first.
 pub fn switch(config: &str, timeout: Duration) -> Result<()> {
-    if prop("sys.usb.state").as_deref() == Some(config) {
+    let serving = prop("sys.usb.state").unwrap_or_default();
+    if serving == config {
         return Ok(());
+    }
+    let (have, want) = (functions_of(&serving), functions_of(config));
+    // Every function the port serves is served by the one asked for: nothing
+    // has to come off, so nothing the computer holds has to be interrupted.
+    if have.iter().all(|f| want.contains(f)) {
+        return set(config, timeout);
     }
     set("none", timeout)?;
     set(config, timeout)

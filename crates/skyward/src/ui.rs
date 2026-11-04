@@ -68,47 +68,6 @@ const STORAGE_LOGS: &str = "Skyward/logs";
 const SCREENSHOTS: &str = "DCIM/Screenshots";
 const HELD_SCREENSHOTS: &str = "/tmp/screenshots";
 
-/// Where the first frame is written on both sides of the hand-over: the
-/// canvas as the pages drew it, and the buffer as the panel reads it. Both
-/// are raw pixels of the panel's size, four bytes each, for a colour that
-/// reaches the panel wrong to be read off.
-///
-/// In memory, not on persist: a frame is eighteen megabytes and persist is a
-/// few, so writing one there fills the partition and fails. What this is for
-/// wants the phone still up; being pulled is the reader's business, and adb
-/// can pull from memory as readily as from a partition.
-const CANVAS_DUMP: &str = "/tmp/frame-canvas.rgba";
-const SCANOUT_DUMP: &str = "/tmp/frame-scanout.rgba";
-
-/// Where what the display was set up as is written: every connector, CRTC
-/// and plane with all of its properties, and the formats each plane takes.
-///
-/// In memory with the frames, and for the same reason: persist is small
-/// enough that a filled one refuses even this, and the description is worth
-/// having only while the recovery that wrote it is up.
-const DISPLAY_STATE: &str = "/tmp/display-state.txt";
-
-/// Its being there asks the recovery to show a pattern of known colours over
-/// its pages once, on the way up, and then go back to the pages.
-///
-/// Looked for in more than one place, because the places a recovery has
-/// differ in what outlives a start: /tmp and /sdcard are memory and are gone
-/// by the time the pages come back, while persist is a partition and is
-/// still there. Whichever is found is taken and removed, so the next start
-/// shows the pages again.
-const SHOW_PATTERN: [&str; 5] = [
-    "/tmp/show-pattern",
-    "/sdcard/show-pattern",
-    "/mnt/vendor/persist/show-pattern",
-    "/persist/show-pattern",
-    "/data/local/tmp/show-pattern",
-];
-
-/// Its being there asks for the frame being shown to be written down, on the
-/// next one: the canvas as the page drew it and the buffer as the panel reads
-/// it, taken while the pages are running rather than at the first frame.
-const LIVE_DUMP: [&str; 3] = ["/mnt/vendor/persist/dump-frame", "/persist/dump-frame", "/tmp/dump-frame"];
-
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
     path: PathBuf,
@@ -339,83 +298,6 @@ fn list(app: &mut App, folder: String, closed: &[Closed]) -> Result<()> {
 /// storage does. `None` for every other folder.
 fn user_of(path: &Path) -> Option<u32> {
     skyward_crypto::users::user_of(path)
-}
-
-/// Show bands of known colour over the panel and hold them a while.
-///
-/// The colours are the pure ones and the pairs they make: a channel that
-/// reaches the glass somewhere it should not turns one of these into another
-/// that is also being shown, so a photograph says which way round the
-/// channels went without anyone having to infer it from a page.
-///
-/// Each pair is laid down twice, once written straight into the canvas and
-/// once blended over it as the pages blend their tiles. The two are the same
-/// bytes either way, so a band that looks right beside one that does not says
-/// that the value is not the whole of it.
-///
-/// What each band is meant to be goes to `say`, so that the picture and the
-/// log together read as one answer.
-fn show_pattern(surface: &mut skyward_ui::surface::kms::KmsSurface, say: &dyn Fn(&str)) {
-    use skyward_ui::color::Rgba;
-    use skyward_ui::Surface;
-    const BANDS: [(Rgba, &str); 8] = [
-        (Rgba::rgb(255, 0, 0), "red 255,0,0"),
-        (Rgba::rgb(0, 255, 0), "green 0,255,0"),
-        (Rgba::rgb(0, 0, 255), "blue 0,0,255"),
-        (Rgba::rgb(255, 255, 0), "yellow 255,255,0"),
-        (Rgba::rgb(255, 0, 255), "magenta 255,0,255"),
-        (Rgba::rgb(0, 255, 255), "cyan 0,255,255"),
-        (Rgba::rgb(255, 255, 255), "white 255,255,255"),
-        (Rgba::rgb(0, 0, 0), "black 0,0,0"),
-    ];
-    // The colours the pages themselves use, which is where the fault was
-    // seen: if these come out right here and wrong on a page, the value is
-    // not what is wrong.
-    const PAGE: [(Rgba, &str); 4] = [
-        (Rgba::rgb(52, 130, 255), "page blue 52,130,255"),
-        (Rgba::rgb(250, 56, 46), "page red 250,56,46"),
-        (Rgba::rgb(29, 205, 58), "page green 29,205,58"),
-        (Rgba::rgb(119, 103, 249), "page purple 119,103,249"),
-    ];
-    let (w, h) = surface.size();
-    let mut canvas = skyward_ui::Canvas::new(w, h);
-    // The pages are drawn on white, and a tile is blended over it: what is
-    // under the blend is what the panel would have had, so it is white here
-    // too rather than the canvas's own clear.
-    canvas.clear(Rgba::rgb(255, 255, 255));
-    let band = h / BANDS.len() as u32;
-    for (i, (colour, what)) in BANDS.iter().enumerate() {
-        let top = band * i as u32;
-        let height = if i + 1 == BANDS.len() { h - top } else { band - 4 };
-        canvas.fill_rect(0.0, top as f32, w as f32, height as f32, *colour);
-        if i + 1 != BANDS.len() {
-            canvas.fill_rect(0.0, (top + height) as f32, w as f32, 4.0, Rgba::rgb(96, 96, 96));
-        }
-        say(&format!("pattern band {i}, rows {top}..{} is {what}", top + height));
-    }
-    // The page's own colours, side by side: the top half of each square
-    // written straight in and the bottom half blended over, so that a value
-    // that comes out wrong here as well as on a page, and one that comes out
-    // right here and wrong there, are told apart in one photograph.
-    let square = h / 8;
-    for (i, (colour, what)) in PAGE.iter().enumerate() {
-        let top = band * 4 + band * i as u32 / 2;
-        canvas.fill_rect(0.0, top as f32, (w / 2) as f32, square as f32, *colour);
-        // The same colour blended over white, which is what a tile is drawn
-        // as: `blend` lays it with its own alpha over what is under it.
-        for y in top..top + square {
-            for x in w / 2..w {
-                canvas.blend(x as i32, y as i32, *colour, 1.0);
-            }
-        }
-        say(&format!("page colour {i} at rows {top}..{} is {what}", top + square));
-    }
-    if let Err(e) = surface.present(&canvas).and_then(|()| surface.settle()) {
-        let _ = skyward_sys::kmsg(&format!("the pattern was not shown: {e:#}"));
-        return;
-    }
-    say("the pattern is on the panel for 20 s");
-    std::thread::sleep(std::time::Duration::from_secs(20));
 }
 
 /// What to say of a folder that cannot be listed because the own files of
@@ -1219,44 +1101,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let fonts = Fonts::load(font, 0, mono)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
     let (w, h) = surface.size();
-    // What the display was set up as goes to a file, not to the kernel log:
-    // the format the pixels are handed over in, every plane's properties and
-    // the formats it takes, which is what a wrong colour on the panel is read
-    // from. A file takes a whole page of it where a log line takes a line's
-    // worth, and the surface holds the card that nothing else may open while
-    // the pages are showing.
-    //
-    // Nothing about this may end the recovery. What it is for only matters if
-    // the pages are up; a phone that stops showing them so that it can
-    // describe them has lost more than it gained.
-    if let Err(e) = surface.write_state(Path::new(DISPLAY_STATE)) {
-        let _ = skyward_sys::kmsg(&format!("the display's state was not written down: {e:#}"));
-    }
-    // Whether the request was seen, and where: a pattern that does not come
-    // up is told apart from a request that was never read this way.
-    let wanted_at = SHOW_PATTERN.iter().find(|p| Path::new(p).exists()).copied();
-    let _ = skyward_sys::kmsg(&format!("the pattern was asked for at {wanted_at:?} (looked in {SHOW_PATTERN:?})"));
-    // A pattern of known colours over the pages, once, where a file asks for
-    // one: what the panel does with a value is read off a photograph of
-    // bands whose values are known, rather than inferred from a page whose
-    // colours were chosen to look right.
-    //
-    // Asked for here, where the surface is already open, because nothing else
-    // may open the display while the pages hold it: a program that tried
-    // would be refused, and the recovery stopped to make room is a recovery
-    // adb is no longer on.
-    if let Some(at) = SHOW_PATTERN.iter().find(|p| Path::new(p).exists()) {
-        let _ = std::fs::remove_file(at);
-        show_pattern(&mut surface, &|said| {
-            let _ = skyward_sys::kmsg(said);
-        });
-    }
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
-    // The first frame goes to disk on both sides of the hand-over, once: the
-    // canvas as the pages drew it and the buffer as the panel reads it.
-    let mut written = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
     // Neither the motor nor the backlight is what shows the pages: a phone
@@ -1565,59 +1412,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
                 if let Some(path) = dump {
                     fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
-                }
-                // A frame taken down while the pages are running, on request:
-                // the canvas as the page drew it, the buffer as the panel
-                // reads it, and the description of what the panel was told.
-                // Asked for through a file so that it can be done at any
-                // moment rather than only at the first frame, which is what
-                // tells a colour that is wrong from the start apart from one
-                // that goes wrong later.
-                if LIVE_DUMP.iter().any(|p| Path::new(p).exists()) {
-                    for p in LIVE_DUMP.iter().filter(|p| Path::new(p).exists()) {
-                        let _ = std::fs::remove_file(p);
-                    }
-                    let bytes = surface.last_frame_bytes();
-                    let same = bytes.len() >= screen.data.len() && bytes[..screen.data.len()] == screen.data[..];
-                    let _ = fs::write(CANVAS_DUMP, &screen.data);
-                    let _ = fs::write(SCANOUT_DUMP, bytes);
-                    let _ = skyward_sys::kmsg(&format!(
-                        "the frame taken down while showing {:?}: canvas and scanout {}",
-                        app.screen(),
-                        if same { "are the same bytes" } else { "differ" }
-                    ));
-                }
-                // Once, the picture on both sides of the hand-over: the
-                // canvas holds what the pages drew, the buffer holds what the
-                // panel reads. A colour that reaches the panel wrong is read
-                // from these two side by side, which is why they go down
-                // before anything else can change them.
-                //
-                // Nothing here may end the recovery. Persist is small -- a
-                // few megabytes -- and a frame is eighteen apiece: writing
-                // both of them there fills it and fails, and a recovery that
-                // stopped because it could not write a diagnostic is a
-                // recovery that never showed its pages at all. What cannot be
-                // written is said and let go.
-                if !written {
-                    written = true;
-                    let bytes = surface.last_frame_bytes();
-                    let wrote = fs::write(CANVAS_DUMP, &screen.data).and_then(|()| fs::write(SCANOUT_DUMP, bytes));
-                    match &wrote {
-                        Ok(()) => {
-                            let _ = skyward_sys::kmsg(&format!(
-                                "the frame handed over: canvas {} bytes, scanout {} bytes, written as {}",
-                                screen.data.len(),
-                                bytes.len(),
-                                surface.order(),
-                            ));
-                        }
-                        Err(e) => {
-                            let _ = skyward_sys::kmsg(&format!("the frame was not written down: {e}"));
-                            let _ = fs::remove_file(CANVAS_DUMP);
-                            let _ = fs::remove_file(SCANOUT_DUMP);
-                        }
-                    }
                 }
                 shown = true;
             }
