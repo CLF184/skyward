@@ -1671,6 +1671,7 @@ pub fn list_toned(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, rows: &[Row], 
 
 /// Account-style card: avatar, name and detail, a strip of readings, then
 /// optional rows. The first rect returned covers the name row.
+#[allow(clippy::too_many_arguments)]
 pub fn device_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, title: &str, sub: &str, stats: &[Stat], rows: &[Row]) -> Block {
     let m = &t.m;
     let lays: Vec<Layout> = rows.iter().map(|r| layout(c, t, f, r)).collect();

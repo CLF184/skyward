@@ -17,7 +17,6 @@
 
 // The choice serves the phone's recovery alone, and the host tests.
 #![cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
-
 use anyhow::Result;
 use std::path::Path;
 
