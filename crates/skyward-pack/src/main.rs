@@ -77,6 +77,17 @@ enum Cmd {
         /// the installed system's vendor_dlkm.
         #[arg(long = "module")]
         modules: Vec<String>,
+        /// A folder holding se_omapi and the libraries it loads, laid out as
+        /// the ramdisk holds them: system/bin/se_omapi, system/lib64/….
+        ///
+        /// A phone whose weaver HAL reaches the secure element through
+        /// Android's own OMAPI service gets nothing back from it in a
+        /// recovery, which runs no such service: every call to the weaver
+        /// then fails, and a user's secret behind a weaver slot cannot be
+        /// read. se_omapi is that service on its own; this puts it in the
+        /// ramdisk, with the init rule that starts it.
+        #[arg(long)]
+        omapi: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -120,7 +131,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, config, font, mono, mono_license, firmware, modules, out } => {
+        Cmd::Recovery { stock, binary, config, font, mono, mono_license, firmware, modules, omapi, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
@@ -152,6 +163,13 @@ fn main() -> Result<()> {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
             rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
+            // The OMAPI service the weaver reaches a secure element through,
+            // with the init rule that starts it beside the services it asks
+            // for. Its own libraries go in beside it, since a recovery's
+            // library path is the ramdisk's and nothing else.
+            if let Some(stage) = &omapi {
+                install_omapi(&mut rd, stage, &read)?;
+            }
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
@@ -253,6 +271,71 @@ const TASK_PROFILES: &[u8] = include_bytes!("task_profiles.json");
 /// The init rules that give the USB port file transfer beside adb, which a
 /// stock recovery does not offer.
 const MTP_RC: &[u8] = include_bytes!("mtp.rc");
+
+/// The init rules that start the OMAPI service a weaver reaches a secure
+/// element through, and the libraries it loads.
+///
+/// The service registers `android.se.omapi.ISecureElementService/default`,
+/// which is the name the Thales weaver HAL looks up. Android's own lives in
+/// system_server; a recovery runs no framework, so it gets its own.
+///
+/// It is started at `late-init`, before any service that would ask it
+/// anything: the weaver is started by the recovery once the secure element
+/// hardware is up, and asks OMAPI the moment it takes a call.
+///
+/// The library path is the ramdisk's own `system/lib64`, where the files
+/// beside this rule are put: a recovery's linker looks nowhere else for a
+/// program that names no path of its own.
+const OMAPI_RC: &[u8] = include_bytes!("omapi.rc");
+
+/// The files se_omapi is, under the folder holding them, and where in the
+/// ramdisk each goes.
+///
+/// The whole chain is named: libbinder_ndk loads libbinder, libutils loads
+/// libvndksupport, and both reach libbase and liblog. libc++, libc, libm and
+/// libdl are not named here because a stock recovery carries them already,
+/// its own programs being C++ too; one that somehow does not is caught when
+/// the service starts and says what it could not load.
+const OMAPI_FILES: [(&str, &str, u32); 10] = [
+    ("system/bin/se_omapi", "system/bin/se_omapi", 0o755),
+    ("system/lib64/libbinder_ndk.so", "system/lib64/libbinder_ndk.so", 0o644),
+    ("system/lib64/libbinder.so", "system/lib64/libbinder.so", 0o644),
+    ("system/lib64/libbase.so", "system/lib64/libbase.so", 0o644),
+    ("system/lib64/libutils.so", "system/lib64/libutils.so", 0o644),
+    ("system/lib64/libvndksupport.so", "system/lib64/libvndksupport.so", 0o644),
+    ("system/lib64/android.se.omapi-V1-ndk.so", "system/lib64/android.se.omapi-V1-ndk.so", 0o644),
+    (
+        "system/lib64/android.hardware.secure_element-V1-ndk.so",
+        "system/lib64/android.hardware.secure_element-V1-ndk.so",
+        0o644,
+    ),
+    ("system/lib64/libcutils.so", "system/lib64/libcutils.so", 0o644),
+    ("system/lib64/liblog.so", "system/lib64/liblog.so", 0o644),
+];
+
+/// Put the OMAPI service, the libraries it loads and the rule that starts it
+/// into `rd`, from the folder `stage` holds them in.
+///
+/// A stock recovery that already runs the service keeps its own: the two
+/// would answer to the same name, and the second to register would replace
+/// the first.
+fn install_omapi(rd: &mut Ramdisk, stage: &PathBuf, read: &impl Fn(&PathBuf) -> Result<Vec<u8>>) -> Result<()> {
+    if rd.find(OMAPI_FILES[0].1).is_some() {
+        return Ok(());
+    }
+    let at = |name: &str| stage.join(name.replace('/', std::path::MAIN_SEPARATOR_STR));
+    for (from, to, mode) in OMAPI_FILES {
+        // Something already there is the stock recovery's own build, which
+        // this one is not to replace.
+        if rd.find(to).is_some() {
+            continue;
+        }
+        let bytes = read(&at(from)).with_context(|| format!("--omapi: {} is not in {}", from, stage.display()))?;
+        rd.add(to, mode, bytes)?;
+    }
+    rd.add(paths::OMAPI_RC, 0o644, OMAPI_RC.to_vec())?;
+    Ok(())
+}
 
 /// A property file without the lines that set any of `names`.
 fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
