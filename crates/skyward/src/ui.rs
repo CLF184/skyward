@@ -348,6 +348,11 @@ fn user_of(path: &Path) -> Option<u32> {
 /// that is also being shown, so a photograph says which way round the
 /// channels went without anyone having to infer it from a page.
 ///
+/// Each pair is laid down twice, once written straight into the canvas and
+/// once blended over it as the pages blend their tiles. The two are the same
+/// bytes either way, so a band that looks right beside one that does not says
+/// that the value is not the whole of it.
+///
 /// What each band is meant to be goes to `say`, so that the picture and the
 /// log together read as one answer.
 fn show_pattern(surface: &mut skyward_ui::surface::kms::KmsSurface, say: &dyn Fn(&str)) {
@@ -363,8 +368,21 @@ fn show_pattern(surface: &mut skyward_ui::surface::kms::KmsSurface, say: &dyn Fn
         (Rgba::rgb(255, 255, 255), "white 255,255,255"),
         (Rgba::rgb(0, 0, 0), "black 0,0,0"),
     ];
+    // The colours the pages themselves use, which is where the fault was
+    // seen: if these come out right here and wrong on a page, the value is
+    // not what is wrong.
+    const PAGE: [(Rgba, &str); 4] = [
+        (Rgba::rgb(52, 130, 255), "page blue 52,130,255"),
+        (Rgba::rgb(250, 56, 46), "page red 250,56,46"),
+        (Rgba::rgb(29, 205, 58), "page green 29,205,58"),
+        (Rgba::rgb(119, 103, 249), "page purple 119,103,249"),
+    ];
     let (w, h) = surface.size();
     let mut canvas = skyward_ui::Canvas::new(w, h);
+    // The pages are drawn on white, and a tile is blended over it: what is
+    // under the blend is what the panel would have had, so it is white here
+    // too rather than the canvas's own clear.
+    canvas.clear(Rgba::rgb(255, 255, 255));
     let band = h / BANDS.len() as u32;
     for (i, (colour, what)) in BANDS.iter().enumerate() {
         let top = band * i as u32;
@@ -374,6 +392,23 @@ fn show_pattern(surface: &mut skyward_ui::surface::kms::KmsSurface, say: &dyn Fn
             canvas.fill_rect(0.0, (top + height) as f32, w as f32, 4.0, Rgba::rgb(96, 96, 96));
         }
         say(&format!("pattern band {i}, rows {top}..{} is {what}", top + height));
+    }
+    // The page's own colours, side by side: the top half of each square
+    // written straight in and the bottom half blended over, so that a value
+    // that comes out wrong here as well as on a page, and one that comes out
+    // right here and wrong there, are told apart in one photograph.
+    let square = h / 8;
+    for (i, (colour, what)) in PAGE.iter().enumerate() {
+        let top = band * 4 + band * i as u32 / 2;
+        canvas.fill_rect(0.0, top as f32, (w / 2) as f32, square as f32, *colour);
+        // The same colour blended over white, which is what a tile is drawn
+        // as: `blend` lays it with its own alpha over what is under it.
+        for y in top..top + square {
+            for x in w / 2..w {
+                canvas.blend(x as i32, y as i32, *colour, 1.0);
+            }
+        }
+        say(&format!("page colour {i} at rows {top}..{} is {what}", top + square));
     }
     if let Err(e) = surface.present(&canvas).and_then(|()| surface.settle()) {
         let _ = skyward_sys::kmsg(&format!("the pattern was not shown: {e:#}"));
