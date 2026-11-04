@@ -171,12 +171,24 @@ pub fn keep_log(path: &Path) -> Result<()> {
     KEPT.set(Mutex::new(file)).map_err(|_| anyhow!("the log is kept in a file already"))
 }
 
+/// How long a line the kernel log takes. The driver refuses anything longer,
+/// and refuses it after having taken the part that fitted, so a write that
+/// runs past this fails with some of the line already in the log.
+const KMSG_LINE: usize = 400;
+
 /// Append a line to the kernel log, where it survives until the next boot
 /// and shows in `dmesg`, and to the file [`keep_log`] opened, stamped with
 /// the seconds since the phone started as the kernel log stamps it.
+///
+/// A line longer than the kernel log takes is written in several, so that no
+/// caller has to know the limit: what is said about a thing is worth having
+/// whole, and the kernel log refusing part of it is no reason for the
+/// recovery to stop saying anything at all.
 pub fn kmsg(line: &str) -> Result<()> {
     let mut f = OpenOptions::new().write(true).open("/dev/kmsg")?;
-    f.write_all(format!("<6>skyward: {line}\n").as_bytes())?;
+    for piece in split_at_words(line, KMSG_LINE) {
+        f.write_all(format!("<6>skyward: {piece}\n").as_bytes())?;
+    }
     if let Some(kept) = KEPT.get() {
         let mut kept = kept.lock().expect("nothing panics while writing the log");
         writeln!(kept, "[{:>12.6}] {line}", since_boot()?.as_secs_f64()).with_context(|| format!("write {LOG}"))?;
@@ -184,18 +196,13 @@ pub fn kmsg(line: &str) -> Result<()> {
     Ok(())
 }
 
-/// [`kmsg`] for words that may outrun a line of the kernel log: `line` cut
-/// into pieces of at most `most` bytes, each written on its own.
+/// [`kmsg`], where not being able to say it is not a failure: for what a
+/// recovery writes about itself while it is still showing its pages.
 ///
-/// The kernel log takes a line only up to a limit of its own, and a write
-/// that runs past it fails having already taken the part that fitted. A
-/// diagnostic long enough to describe every property of a display has to go
-/// in several lines, or it does not go at all: what it describes is the
-/// reason it is being written, so nothing about it may be left out.
-///
-/// What cannot be written is not an error here. A recovery that cannot say
-/// what it did is still a recovery; one that stops because it could not is
-/// a dark panel.
+/// A recovery that cannot say what it did is still a recovery; one that
+/// stops because it could not is a dark panel. Long lines are cut by [`kmsg`]
+/// itself, so this is only about the case where the log cannot be opened at
+/// all.
 pub fn kmsg_long(line: &str, most: usize) {
     for piece in split_at_words(line, most) {
         let _ = kmsg(piece);

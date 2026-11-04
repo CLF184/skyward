@@ -1435,18 +1435,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 // panel reads. A colour that reaches the panel wrong is read
                 // from these two side by side, which is why they go down
                 // before anything else can change them.
+                //
+                // Nothing here may end the recovery: these files are for a
+                // person with adb, and a phone that stops showing its pages so
+                // that it can write them is worse off than one that does not.
                 if !written {
-                    let bytes = surface.last_frame_bytes();
-                    fs::write(CANVAS_DUMP, &screen.data).with_context(|| format!("write {CANVAS_DUMP}"))?;
-                    fs::write(SCANOUT_DUMP, bytes).with_context(|| format!("write {SCANOUT_DUMP}"))?;
-                    skyward_sys::kmsg(&format!(
-                        "the frame handed over: canvas {} bytes, scanout {} bytes, written as {}, {}",
-                        screen.data.len(),
-                        bytes.len(),
-                        surface.order(),
-                        surface.describe(),
-                    ))?;
                     written = true;
+                    let bytes = surface.last_frame_bytes();
+                    let wrote = fs::write(CANVAS_DUMP, &screen.data).and_then(|()| fs::write(SCANOUT_DUMP, bytes));
+                    match wrote {
+                        Ok(()) => skyward_sys::kmsg_long(&format!("the frame handed over: canvas {} bytes, scanout {} bytes, written as {}", screen.data.len(), bytes.len(), surface.order()), 400),
+                        Err(e) => skyward_sys::kmsg_long(&format!("the frame was not written down: {e}"), 400),
+                    }
                 }
                 shown = true;
             }
