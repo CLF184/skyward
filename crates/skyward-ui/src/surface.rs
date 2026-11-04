@@ -545,10 +545,19 @@ pub mod kms {
                 }
                 Err(_) => SdeMode { mixers: 1, dsc: false, bpp: None },
             };
-            let strips = layout.mixers as usize;
-            if w % layout.mixers != 0 {
-                return Err(anyhow!("{w} pixels do not split into {strips} strips"));
-            }
+            // One plane across the whole width, as Android's compositor hands
+            // a full-screen layer over. The mode is driven by two layer
+            // mixers, and splitting the picture between them is what a
+            // compositor does for two layers; one layer needs one plane, and
+            // the hardware splits it between the mixers itself when the mode
+            // is picked with both.
+            //
+            // Driving two strips by hand is what this did, and the colours
+            // came out wrong with the buffer written exactly right: a
+            // compressed mode split that way is not the same picture as one
+            // the controller splits.
+            let strips: usize = 1;
+            let _ = layout.mixers;
 
             // Primary planes that can drive the CRTC, those already on it
             // first so the boot splash's planes are reused; planes on the
@@ -647,10 +656,11 @@ pub mod kms {
                 req.add_property(other, props.handle("FB_ID")?, property::Value::Framebuffer(None));
                 req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
             }
-            let strip = w / layout.mixers;
             let mut planes = Vec::new();
-            for (i, (plane, _, props, _)) in candidates.iter().enumerate() {
-                let x = strip * i as u32;
+            for (i, (plane, _, props, _)) in candidates.iter().take(strips).enumerate() {
+                let _ = i;
+                let x: u32 = 0;
+                let strip = w;
                 let fb_prop = props.handle("FB_ID")?;
                 req.add_property(*plane, fb_prop, property::Value::Framebuffer(Some(bufs[0].fb)));
                 req.add_property(*plane, props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
