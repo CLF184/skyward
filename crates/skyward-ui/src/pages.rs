@@ -139,6 +139,10 @@ pub fn confirm_label(which: Confirm, s: &State) -> (&'static str, bool) {
 pub const HOME_TITLE: &str = "Skyward";
 pub const SEARCH_HINT: Text = ["搜索功能与分区", "搜尋功能與分割區", "Search features and partitions"];
 
+/// Captions under the readings on the home card's strip.
+const DATA_STATE: Text = ["数据分区", "資料分割區", "Data partition"];
+const FREE_SPACE: Text = ["可用空间", "可用空間", "Free space"];
+
 const REBOOT_TARGETS: [(Text, Option<Text>); 6] = [
     (["系统", "系統", "System"], None),
     (["恢复模式", "復原模式", "Recovery"], None),
@@ -201,8 +205,9 @@ fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
 }
 
 /// Recovery home, laid out like the Settings root: title, search, a device
-/// card, then grouped entries. The status bar carries the readings: the
-/// slot, the data partition's lock and the battery's temperature.
+/// card, then grouped entries. The card's strip carries the readings: the
+/// slot, the data partition's lock, the room left on it and the battery; the
+/// status bar adds the battery's temperature.
 pub fn home(cx: &Ctx) -> Frame {
     let (t, f, i, l) = (cx.t, cx.f, cx.info, cx.state.lang);
     let mut c = long_page(cx);
@@ -244,7 +249,25 @@ pub fn home(cx: &Ctx) -> Frame {
         rows.push(Row::new(title).icon(ORANGE, Icon::Power).subtitle(note).trail(Trail::Arrow));
         opens.push(Some(Action::Open(Screen::Slot)));
     }
-    let card = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &rows);
+    // The strip of readings under the phone's name: the slot the recovery
+    // runs from, the data partition's lock, the room left on it and the
+    // battery's level, each as the stock settings home shows them.
+    let stats = [
+        widgets::Stat {
+            value: i.slot.map(|s| s.letter().to_string()).unwrap_or_else(|| l.pick(["未知", "不明", "Unknown"]).to_string()),
+            caption: l.pick(CURRENT_SLOT),
+        },
+        widgets::Stat { value: fmt::data(l, &cx.state.data).to_string(), caption: l.pick(DATA_STATE) },
+        widgets::Stat {
+            value: i.storage.free.map(fmt::bytes).unwrap_or_else(|| l.pick(["未知", "不明", "Unknown"]).to_string()),
+            caption: l.pick(FREE_SPACE),
+        },
+        widgets::Stat {
+            value: i.battery.as_ref().map(|b| format!("{}%", b.level)).unwrap_or_else(|| l.pick(["未知", "不明", "Unknown"]).to_string()),
+            caption: i.battery.as_ref().map(|b| fmt::charge(l, b.charge)).unwrap_or_else(|| l.pick(["无电池", "無電池", "No battery"])),
+        },
+    ];
+    let card = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &stats, &rows);
     out.push(Hit { rect: card.rows[0], action: Action::Open(Screen::About) });
     out.extend(card.rows[1..].iter().zip(&opens).filter_map(|(&rect, open)| open.map(|action| Hit { rect, action })));
     y = card.bottom + t.m.card_gap;

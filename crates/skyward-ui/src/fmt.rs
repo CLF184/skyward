@@ -200,7 +200,7 @@ pub fn verified(l: Lang, state: &str) -> String {
 pub fn snapshot(l: Lang, s: &SnapshotState) -> &'static str {
     l.pick(match s {
         SnapshotState::None => ["暂无待合并的更新", "沒有待合併的更新", "No update waiting to merge"],
-        SnapshotState::Snapshotted => ["更新已写入，等待合并", "更新已寫入，等待合併", "Update written, waiting to merge"],
+        SnapshotState::Snapshotted => ["更新已写入快照，等待合并", "更新已寫入快照，等待合併", "Update written to snapshots, waiting to merge"],
         SnapshotState::Merging => ["正在合并更新", "正在合併更新", "Merging the update"],
         SnapshotState::MergeFailed => ["更新合并失败", "更新合併失敗", "The update failed to merge"],
         SnapshotState::Unknown => ["无法读取更新状态", "無法讀取更新狀態", "Couldn't read the update's status"],
@@ -212,7 +212,7 @@ pub fn snapshot_note(l: Lang, s: &SnapshotState) -> Option<&'static str> {
     let text = match s {
         SnapshotState::None => return None,
         SnapshotState::Snapshotted | SnapshotState::Merging => {
-            ["更新合并完成前，暂不刷写 super 中的分区", "更新合併完成前，暫不刷寫 super 中的分割區", "Partitions in super aren't flashed until the update merges"]
+            ["合并完成前不会刷写 super 里的分区", "合併完成前不會刷寫 super 裡的分割區", "Partitions in super aren't flashed until the merge completes"]
         }
         SnapshotState::MergeFailed => [
             "在系统中处理完成前，暂不刷写 super 中的分区",
@@ -1679,11 +1679,11 @@ mod tests {
         assert_eq!(refusal(HANS, &Refusal::Battery { level: 12, charging: true }, "ishtar", pc, 0), "电量仅剩 12%，请充电至 15% 以上后重试。");
         assert_eq!(
             refusal(HANS, &Refusal::Pending(SnapshotState::Snapshotted), "ishtar", pc, 0),
-            "更新已写入，等待合并。请重启到系统，完成上一次更新后重试。"
+            "更新已写入快照，等待合并。请重启到系统，完成上一次更新后重试。"
         );
         assert_eq!(
             refusal(Lang::En, &Refusal::Pending(SnapshotState::Snapshotted), "ishtar", pc, 0),
-            "Update written, waiting to merge. Reboot to the system to finish the last update, then try again."
+            "Update written to snapshots, waiting to merge. Reboot to the system to finish the last update, then try again."
         );
         assert_eq!(failure(HANS, &Failure::Engine(26), pc), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
         assert_eq!(failure(Lang::Hant, &Failure::Engine(26), pc), ("更新檔簽章驗證失敗，請傳送官方更新檔。".into(), Some("錯誤代碼：26".into())));
