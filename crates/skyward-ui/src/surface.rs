@@ -538,7 +538,7 @@ pub mod kms {
                     let text = card.get_property_blob(blob).context("read mode_properties")?;
                     SdeMode::find(&String::from_utf8_lossy(&text), &mode.name().to_string_lossy())?
                 }
-                Err(_) => SdeMode { mixers: 1, dsc: false },
+                Err(_) => SdeMode { mixers: 1, dsc: false, bpp: None },
             };
             let strips = layout.mixers as usize;
             if w % layout.mixers != 0 {
