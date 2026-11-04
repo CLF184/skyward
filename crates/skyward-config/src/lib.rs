@@ -696,8 +696,8 @@ mod tests {
         let cfg = DeviceConfig::parse(text).unwrap();
         assert_eq!(cfg.services[0].sockets[0].name, "hlos_mink_opener");
         assert_eq!(cfg.services[0].sockets[0].mode, 0o660);
-        assert!(DeviceConfig::parse(text.replace("kind = \"stream\"", "kind = \"unknown\"")).is_err());
-        assert!(DeviceConfig::parse(text.replace("name = \"hlos_mink_opener\"", "name = \"/dev/bad\"")).is_err());
+        assert!(DeviceConfig::parse(&text.replace("kind = \"stream\"", "kind = \"unknown\"")).is_err());
+        assert!(DeviceConfig::parse(&text.replace("name = \"hlos_mink_opener\"", "name = \"/dev/bad\"")).is_err());
     }
 
     #[test]
