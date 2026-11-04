@@ -67,13 +67,21 @@ struct SdeMode {
     /// strip of the screen.
     mixers: u32,
     dsc: bool,
+    /// The DSC rate this mode is made for, as the connector's `bpp_mode`
+    /// property numbers it: 0 for 8 bits a pixel, 1 for 10, 2 for 12.
+    ///
+    /// A mode driven with a rate other than its own is decompressed with the
+    /// wrong arithmetic, and the panel shows the picture with its channels
+    /// mangled rather than its geometry wrong.
+    bpp: Option<u64>,
 }
 
 #[cfg(any(target_os = "android", test))]
 impl SdeMode {
     fn find(text: &str, name: &str) -> Result<SdeMode> {
         let mut current = false;
-        let (mut topology, mut dsc) = (None, false);
+        let (mut topology, mut bpp) = (None, None);
+        let mut dsc = false;
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
             if key == "mode_name" {
@@ -85,6 +93,7 @@ impl SdeMode {
                 match key {
                     "topology" => topology = Some(value),
                     "dsc_mode" => dsc = value == "1",
+                    "bpp_mode" => bpp = value.parse().ok(),
                     _ => {}
                 }
             }
@@ -97,7 +106,7 @@ impl SdeMode {
         } else {
             1
         };
-        Ok(SdeMode { mixers, dsc })
+        Ok(SdeMode { mixers, dsc, bpp })
     }
 }
 
@@ -105,15 +114,30 @@ impl SdeMode {
 mod tests {
     use super::*;
 
-    const ISHTAR: &str = "mode_name=1440x3200x60cmd\nbit_clk_rate=1360000000\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
-                          mode_name=1440x3200x120cmd\nsubmode_idx=1\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
+    const ISHTAR: &str = "mode_name=1440x3200x60cmd\nbit_clk_rate=1360000000\nbpp_mode=2\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
+                          mode_name=1440x3200x120cmd\nsubmode_idx=1\nbpp_mode=2\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
                           mode_name=1080x2400x60cmd\ndsc_mode=0\ntopology=sde_singlepipe\n";
 
     #[test]
     fn reads_the_topology_of_the_named_mode() {
-        assert_eq!(SdeMode::find(ISHTAR, "1440x3200x120cmd").unwrap(), SdeMode { mixers: 2, dsc: true });
-        assert_eq!(SdeMode::find(ISHTAR, "1080x2400x60cmd").unwrap(), SdeMode { mixers: 1, dsc: false });
+        assert_eq!(SdeMode::find(ISHTAR, "1440x3200x120cmd").unwrap(), SdeMode { mixers: 2, dsc: true, bpp: Some(2) });
+        assert_eq!(SdeMode::find(ISHTAR, "1080x2400x60cmd").unwrap(), SdeMode { mixers: 1, dsc: false, bpp: None });
         assert!(SdeMode::find(ISHTAR, "1440x3200x90cmd").is_err());
+    }
+
+    #[test]
+    fn the_rate_a_mode_is_compressed_at_is_read_beside_the_rest() {
+        // A haotian's own mode: two pipes, DSC on, compressed at 12 bits a
+        // pixel. Driven at 8 instead, the panel shows the picture with its
+        // colours mangled -- which is what this phone did until the rate was
+        // set from here.
+        let haotian = "mode_name=1440x3200x120cmd\nsubmode_idx=1\nbpp_mode=2\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n";
+        let mode = SdeMode::find(haotian, "1440x3200x120cmd").unwrap();
+        assert_eq!(mode.bpp, Some(2), "12 bits a pixel");
+        assert!(mode.dsc && mode.mixers == 2);
+        // A mode that names no rate leaves it alone rather than guessing.
+        let bare = "mode_name=a\nbpp_mode=x\ndsc_mode=1\ntopology=sde_singlepipe\n";
+        assert_eq!(SdeMode::find(bare, "a").unwrap().bpp, None);
     }
 
     #[test]
@@ -259,6 +283,35 @@ pub mod kms {
             _ => None,
         }
         .ok_or_else(|| anyhow!("{} offers no {choice}", info.name().to_string_lossy()))
+    }
+
+    /// The choice an enum property names `choice`, or the one sitting at
+    /// `index` among its choices where no choice is named that.
+    ///
+    /// Qualcomm's `bpp_mode` is an enumeration whose choices are numbered the
+    /// same way the mode description numbers its rate -- 0 for 8 bits a
+    /// pixel, 1 for 10, 2 for 12 -- but the names it gives them are the
+    /// driver's business. Looking the number up among the values covers both
+    /// a driver that names them and one that only numbers them.
+    fn enum_choice(card: &Card, id: property::Handle, choices: &[&str], index: u64) -> Result<u64> {
+        for choice in choices {
+            if let Ok(v) = enum_value(card, id, choice) {
+                return Ok(v);
+            }
+        }
+        let info = card.get_property(id).context("read property")?;
+        if let property::ValueType::Enum(e) = info.value_type() {
+            let (_, values) = e.values();
+            if let Some(v) = values.iter().find(|v| v.value() == index) {
+                return Ok(v.value());
+            }
+            // The enumeration is numbered from zero in the order it lists
+            // them where the values themselves are not the index.
+            if let Some(v) = values.get(index as usize) {
+                return Ok(v.value());
+            }
+        }
+        anyhow::bail!("{} offers nothing at {index}", info.name().to_string_lossy())
     }
 
     /// Built-in panel interfaces. Writeback and external outputs are never
@@ -547,11 +600,27 @@ pub mod kms {
             let blob = card.create_property_blob(&mode).context("create mode blob")?;
             let first = card.create_property_blob(preferred).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
-            // The mode is DSC-compressed: select its DSC variant, as Android's
-            // compositor does.
+            // The mode is DSC-compressed: select its variant, as Android's
+            // compositor does, and give the compressor the rate the mode was
+            // made for. The rate is the panel's own: compressed at another
+            // one it is decompressed with the wrong arithmetic, and what
+            // reaches the glass is the picture with its colours mangled.
+            //
+            // The connector numbers the rate as an enumeration, so the number
+            // the mode's description carries is looked up among the choices
+            // rather than written straight in, and a connector that does not
+            // offer it is left as it is.
             if layout.dsc {
                 let (id, _) = conn_props.get("dsc_mode")?;
                 req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
+                if let Some(bpp) = layout.bpp {
+                    if let Ok((id, _)) = conn_props.get("bpp_mode") {
+                        let choice = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp);
+                        if let Ok(choice) = choice {
+                            req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
+                        }
+                    }
+                }
             }
             // Frame starts are posted to the hardware: the driver's own
             // default on display hardware of this generation, and Android's
