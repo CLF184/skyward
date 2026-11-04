@@ -82,11 +82,18 @@ const DISPLAY_STATE: &str = "/tmp/display-state.txt";
 /// Its being there asks the recovery to show a pattern of known colours over
 /// its pages once, on the way up, and then go back to the pages.
 ///
-/// Looked for in more than one place: /tmp is memory and is gone by the time
-/// the pages come back after a start, while the data partition outlives it
-/// but is not always open. Whichever is there is taken and removed, so the
-/// next start shows the pages again.
-const SHOW_PATTERN: [&str; 3] = ["/tmp/show-pattern", "/data/local/tmp/show-pattern", "/sdcard/show-pattern"];
+/// Looked for in more than one place, because the places a recovery has
+/// differ in what outlives a start: /tmp and /sdcard are memory and are gone
+/// by the time the pages come back, while persist is a partition and is
+/// still there. Whichever is found is taken and removed, so the next start
+/// shows the pages again.
+const SHOW_PATTERN: [&str; 5] = [
+    "/tmp/show-pattern",
+    "/sdcard/show-pattern",
+    "/mnt/vendor/persist/show-pattern",
+    "/persist/show-pattern",
+    "/data/local/tmp/show-pattern",
+];
 
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
