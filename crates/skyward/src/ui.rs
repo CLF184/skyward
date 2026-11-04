@@ -1100,8 +1100,7 @@ fn wait(fds: &[i32], timeout_ms: i32) -> Result<()> {
 
 /// Run the pages. What `request`, read from misc, asks for decides the
 /// first of them; asking for nothing, they start at `start`.
-pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, start: Screen, dump: Option<&Path>) -> Result<()> {
-    if cfg.display.density == 0 {
+pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, start: Screen, dump: Option<&Path>) -> Result<()> {    if cfg.display.density == 0 {
         return Err(anyhow!("{}: [display] density is required to lay out the UI", cfg.device.codename));
     }
     let mut info = skyward_info::collect(cfg)?;
@@ -1111,7 +1110,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // What the display was set up as goes to the phone's log: the format the
     // pixels are handed over in, and the planes they go through, which is
     // what a wrong colour on the panel is read from.
-    skyward_sys::kmsg(&format!("display {}", surface.describe()))?;
+    //
+    // Said in lines short enough for the kernel log to take, and never at
+    // the cost of the pages: a diagnostic that cannot be written is no
+    // reason to leave the panel dark.
+    skyward_sys::kmsg_long(&format!("display {}", surface.describe()), 400);
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
