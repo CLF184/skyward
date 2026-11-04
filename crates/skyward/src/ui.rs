@@ -79,6 +79,10 @@ const SCANOUT_DUMP: &str = "/tmp/frame-scanout.rgba";
 /// and plane with all of its properties, and the formats each plane takes.
 const DISPLAY_STATE: &str = "/tmp/display-state.txt";
 
+/// Its being there asks the recovery to show a pattern of known colours over
+/// its pages once, on the way up, and then go back to the pages.
+const SHOW_PATTERN: &str = "/tmp/show-pattern";
+
 /// The panel backlight under /sys/class/backlight.
 struct Backlight {
     path: PathBuf,
@@ -309,6 +313,48 @@ fn list(app: &mut App, folder: String, closed: &[Closed]) -> Result<()> {
 /// storage does. `None` for every other folder.
 fn user_of(path: &Path) -> Option<u32> {
     skyward_crypto::users::user_of(path)
+}
+
+/// Show bands of known colour over the panel and hold them a while.
+///
+/// The colours are the pure ones and the pairs they make: a channel that
+/// reaches the glass somewhere it should not turns one of these into another
+/// that is also being shown, so a photograph says which way round the
+/// channels went without anyone having to infer it from a page.
+///
+/// What each band is meant to be goes to `say`, so that the picture and the
+/// log together read as one answer.
+fn show_pattern(surface: &mut skyward_ui::surface::kms::KmsSurface, say: &dyn Fn(&str)) {
+    use skyward_ui::color::Rgba;
+    use skyward_ui::Surface;
+    const BANDS: [(Rgba, &str); 8] = [
+        (Rgba::rgb(255, 0, 0), "red 255,0,0"),
+        (Rgba::rgb(0, 255, 0), "green 0,255,0"),
+        (Rgba::rgb(0, 0, 255), "blue 0,0,255"),
+        (Rgba::rgb(255, 255, 0), "yellow 255,255,0"),
+        (Rgba::rgb(255, 0, 255), "magenta 255,0,255"),
+        (Rgba::rgb(0, 255, 255), "cyan 0,255,255"),
+        (Rgba::rgb(255, 255, 255), "white 255,255,255"),
+        (Rgba::rgb(0, 0, 0), "black 0,0,0"),
+    ];
+    let (w, h) = surface.size();
+    let mut canvas = skyward_ui::Canvas::new(w, h);
+    let band = h / BANDS.len() as u32;
+    for (i, (colour, what)) in BANDS.iter().enumerate() {
+        let top = band * i as u32;
+        let height = if i + 1 == BANDS.len() { h - top } else { band - 4 };
+        canvas.fill_rect(0.0, top as f32, w as f32, height as f32, *colour);
+        if i + 1 != BANDS.len() {
+            canvas.fill_rect(0.0, (top + height) as f32, w as f32, 4.0, Rgba::rgb(96, 96, 96));
+        }
+        say(&format!("pattern band {i}, rows {top}..{} is {what}", top + height));
+    }
+    if let Err(e) = surface.present(&canvas).and_then(|()| surface.settle()) {
+        let _ = skyward_sys::kmsg(&format!("the pattern was not shown: {e:#}"));
+        return;
+    }
+    say("the pattern is on the panel for 20 s");
+    std::thread::sleep(std::time::Duration::from_secs(20));
 }
 
 /// What to say of a folder that cannot be listed because the own files of
@@ -1124,6 +1170,21 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // describe them has lost more than it gained.
     if let Err(e) = surface.write_state(Path::new(DISPLAY_STATE)) {
         let _ = skyward_sys::kmsg(&format!("the display's state was not written down: {e:#}"));
+    }
+    // A pattern of known colours over the pages, once, where a file asks for
+    // one: what the panel does with a value is read off a photograph of
+    // bands whose values are known, rather than inferred from a page whose
+    // colours were chosen to look right.
+    //
+    // Asked for here, where the surface is already open, because nothing else
+    // may open the display while the pages hold it: a program that tried
+    // would be refused, and the recovery stopped to make room is a recovery
+    // adb is no longer on.
+    if Path::new(SHOW_PATTERN).exists() {
+        let _ = std::fs::remove_file(SHOW_PATTERN);
+        show_pattern(&mut surface, &|said| {
+            let _ = skyward_sys::kmsg(said);
+        });
     }
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
