@@ -364,7 +364,14 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
             ),
         },
     };
-    let id = crate::blobs::beside_the_weaver(&dir, &id, ids)?;
+    // What the phone kept beside the blobs, where it records a weaver
+    // binding, is said where the recovery keeps its log: a recovery puts
+    // nothing on a terminal for a person to read.
+    let chosen = crate::blobs::beside_the_weaver(&dir, &id, ids)?;
+    if let Some(said) = &chosen.said {
+        let _ = skyward_sys::kmsg(said);
+    }
+    let id = chosen.id;
     // A user who has set a screen lock has what the phone recorded about
     // it beside the blob; a user who has set none has nothing there.
     let recorded = dir.join(format!("{id}.pwd"));

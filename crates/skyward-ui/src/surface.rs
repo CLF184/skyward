@@ -14,6 +14,50 @@ pub trait Surface {
     fn settle(&mut self) -> Result<()>;
 }
 
+/// Byte order of the scanout buffer against the canvas's RGBA.
+#[cfg(any(target_os = "android", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Order {
+    Rgba,
+    Bgra,
+}
+
+/// The order the canvas's red, green, blue and alpha have to be written in
+/// for a scanout buffer of `fourcc`.
+///
+/// DRM names a format by its bits from the most significant down, so a
+/// little-endian machine lays the bytes out the other way: `Xrgb8888` is
+/// `[B, G, R, X]` in memory, and the canvas's `[R, G, B, A]` reaches it only
+/// by swapping the two end bytes. `Xbgr8888` is `[R, G, B, X]`, and what the
+/// canvas holds goes straight in.
+///
+/// The high byte is dropped by the display controller either way: a mode
+/// that reads `X` ignores it, and one that reads `A` takes the canvas's
+/// opaque 255, which is what these pages are.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn order_of(fourcc: u32) -> Order {
+    // The fourcc codes the `drm` crate carries, named here so that the choice
+    // is made and tested without it. Each spells its bytes the way the format
+    // is written: 'XB24' is 0x34324258.
+    const XB24: u32 = 0x3432_4258; // Xbgr8888: [R, G, B, X] in memory
+    const AB24: u32 = 0x3432_4241; // Abgr8888: [R, G, B, A]
+    const XR24: u32 = 0x3432_5258; // Xrgb8888: [B, G, R, X]
+    const AR24: u32 = 0x3432_5241; // Argb8888: [B, G, R, A]
+    match fourcc {
+        XB24 | AB24 => Order::Rgba,
+        XR24 | AR24 => Order::Bgra,
+        // A format this does not know is written as the one the canvas's
+        // bytes reach by turning them round, which is what the panel shows
+        // most often; a buffer of another format is a fault of its own.
+        _ => Order::Bgra,
+    }
+}
+
+/// The 32-bit RGB formats a scanout buffer may be made in, the ones whose
+/// pixels the canvas reaches by turning nothing or two bytes round.
+#[cfg(any(target_os = "android", test))]
+pub(crate) const SCANOUT: [u32; 4] = [0x3432_4258, 0x3432_4241, 0x3432_5258, 0x3432_5241];
+
 /// How Qualcomm's display driver drives a mode, from the text of the
 /// connector's mode_properties blob: key=value lines, a block per mode_name.
 #[cfg(any(target_os = "android", test))]
@@ -71,6 +115,34 @@ mod tests {
         assert_eq!(SdeMode::find(ISHTAR, "1080x2400x60cmd").unwrap(), SdeMode { mixers: 1, dsc: false });
         assert!(SdeMode::find(ISHTAR, "1440x3200x90cmd").is_err());
     }
+
+    #[test]
+    fn a_format_whose_bytes_name_red_first_takes_the_canvas_as_it_is() {
+        // 'XB24' and 'AB24' lay their bytes out [R, G, B, x] on a machine of
+        // this kind's byte order, which is the canvas's own order.
+        assert_eq!(order_of(0x3432_4258), Order::Rgba, "Xbgr8888");
+        assert_eq!(order_of(0x3432_4241), Order::Rgba, "Abgr8888");
+    }
+
+    #[test]
+    fn a_format_whose_bytes_name_blue_first_has_its_ends_swapped() {
+        // 'XR24' and 'AR24' lay theirs out [B, G, R, x]: red and blue reach
+        // the panel the wrong way round unless the canvas's are swapped.
+        assert_eq!(order_of(0x3432_5258), Order::Bgra, "Xrgb8888");
+        assert_eq!(order_of(0x3432_5241), Order::Bgra, "Argb8888");
+    }
+
+    #[test]
+    fn every_format_offered_for_scanout_is_one_the_panel_can_be_handed() {
+        // What the pick offers has to be exactly what the order is known for:
+        // a format offered but not known would be presented with its red and
+        // blue the wrong way round.
+        for f in SCANOUT {
+            assert!(matches!(order_of(f), Order::Rgba | Order::Bgra), "0x{f:08x}");
+            assert!(f == 0x3432_4258 || f == 0x3432_4241 || f == 0x3432_5258 || f == 0x3432_5241, "0x{f:08x}");
+        }
+        assert_eq!(SCANOUT.len(), 4, "the four 32-bit RGB formats the canvas can reach");
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -126,13 +198,6 @@ pub mod kms {
         fn offsets(&self) -> [u32; 4] {
             [0; 4]
         }
-    }
-
-    /// Byte order of the scanout buffer against the canvas's RGBA.
-    #[derive(Clone, Copy, Debug)]
-    enum Order {
-        Rgba,
-        Bgra,
     }
 
     struct Buf {
@@ -318,6 +383,10 @@ pub mod kms {
         let handle = info.buffer().ok_or_else(|| anyhow!("no buffer handle for the framebuffer; capturing needs root"))?;
         let (w, h) = info.size();
         let pitch = info.pitch() as usize;
+        // The scanout buffer holds its pixels in the order its format names,
+        // which is not the canvas's own; a picture taken without turning them
+        // back reads with red and blue the wrong way round.
+        let order = order_of(info.format());
         let map = drm_ffi::mode::dumbbuffer::map(card.as_fd(), handle.into(), 0, 0).context("map the framebuffer")?;
         let len = pitch * h as usize;
         let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, card.as_fd().as_raw_fd(), map.offset as libc::off_t) };
@@ -328,7 +397,16 @@ pub mod kms {
         let mut c = Canvas::new(w, h);
         let row = w as usize * 4;
         for y in 0..h as usize {
-            c.data[y * row..(y + 1) * row].copy_from_slice(&src[y * pitch..y * pitch + row]);
+            let line = &src[y * pitch..y * pitch + row];
+            let out = &mut c.data[y * row..(y + 1) * row];
+            match order {
+                Order::Rgba => out.copy_from_slice(line),
+                Order::Bgra => {
+                    for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(line.as_chunks::<4>().0) {
+                        *o = [s[2], s[1], s[0], s[3]];
+                    }
+                }
+            }
         }
         unsafe { libc::munmap(ptr, len) };
         Ok(c)
@@ -448,16 +526,12 @@ pub mod kms {
             }
             candidates.truncate(strips);
 
-            let pick = [
-                (DrmFourcc::Xbgr8888, Order::Rgba),
-                (DrmFourcc::Abgr8888, Order::Rgba),
-                (DrmFourcc::Xrgb8888, Order::Bgra),
-                (DrmFourcc::Argb8888, Order::Bgra),
-            ];
-            let (fourcc, order) = pick
+            let fourcc = SCANOUT
                 .into_iter()
-                .find(|(f, _)| candidates.iter().all(|c| c.1.contains(&(*f as u32))))
+                .find(|f| candidates.iter().all(|c| c.1.contains(f)))
                 .ok_or_else(|| anyhow!("the primary planes share none of the 32-bit RGB formats"))?;
+            let order = order_of(fourcc);
+            let fourcc = DrmFourcc::try_from(fourcc).expect("the formats chosen are ones it names");
 
             let make = || -> Result<Buf> {
                 let db = card.create_dumb_buffer((w, h), fourcc, 32).context("create dumb buffer")?;

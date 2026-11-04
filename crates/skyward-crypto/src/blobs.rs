@@ -35,6 +35,18 @@ fn bound_to_a_weaver(dir: &Path, id: &str) -> bool {
     has(dir, id, "weaver")
 }
 
+/// What came of choosing between a user's blobs: the one to open, and what
+/// the phone kept beside them where the choice was not plain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chosen {
+    /// The blob to open.
+    pub id: String,
+    /// What is worth saying of the choice, where the phone records a weaver
+    /// binding for a blob: the recovery writes it to the kernel log, where a
+    /// phone's own recovery leaves what it did.
+    pub said: Option<String>,
+}
+
 /// The blob to open, which is `id` unless that one is bound to a weaver and
 /// another of the user's blobs is not.
 ///
@@ -42,32 +54,32 @@ fn bound_to_a_weaver(dir: &Path, id: &str) -> bool {
 /// carry the credential the phone recorded with it, or there would be
 /// nothing to check a credential against and nothing to unwrap the secret
 /// with.
-pub fn beside_the_weaver(dir: &Path, id: &str, ids: Vec<String>) -> Result<String> {
+pub fn beside_the_weaver(dir: &Path, id: &str, ids: Vec<String>) -> Result<Chosen> {
     if !bound_to_a_weaver(dir, id) {
-        return Ok(id.to_string());
+        return Ok(Chosen { id: id.to_string(), said: None });
     }
     // Every blob is written down as it stands, so that a phone which kept
     // none for the older credential can be told from one whose second blob
     // is there but does not carry what the way round the weaver needs.
-    eprintln!("the blob the phone records is bound to a weaver; the blobs beside it are {}", describe(dir, &ids));
+    let seen = format!("the blob the phone records is bound to a weaver; the blobs beside it are {}", describe(dir, &ids));
     let usable = ids.into_iter().find(|other| !bound_to_a_weaver(dir, other) && has(dir, other, "secdis") && has(dir, other, "pwd"));
     match usable {
         Some(other) => {
             // Said as it happens, so a recovery that opens the second blob
             // rather than the recorded one can be told apart from one that
             // opens what the phone recorded.
-            eprintln!("the recorded blob is bound to a weaver the recovery cannot reach; opening the one bound beside it: {other}");
-            Ok(other)
+            let said = format!("{seen}; opening the one bound beside it: {other}");
+            Ok(Chosen { id: other, said: Some(said) })
         }
         None => {
             // Nothing can open the recorded blob here, and there is no second
-            // one to fall back on. Say so rather than let the weaver's own
-            // failure stand in for the reason.
-            eprintln!(
-                "the recorded blob is bound to a weaver, and no blob beside it is bound to anything a recovery can reach; \
-                 the files of the user that blob belongs to cannot be opened in a recovery"
+            // one to fall back on. Said before the weaver is asked, so that
+            // the failure that follows is read with its reason.
+            let said = format!(
+                "{seen}; no blob beside it is bound to anything a recovery can reach, \
+                 so the files of the user it belongs to cannot be opened in a recovery"
             );
-            Ok(id.to_string())
+            Ok(Chosen { id: id.to_string(), said: Some(said) })
         }
     }
 }
@@ -114,7 +126,7 @@ mod tests {
     #[test]
     fn a_blob_bound_to_no_weaver_is_opened_as_it_is() {
         let dir = blobs("plain", &["abc.spblob", "abc.secdis", "abc.pwd"]);
-        assert_eq!(beside_the_weaver(&dir, "abc", vec!["abc".into()]).unwrap(), "abc");
+        assert_eq!(beside_the_weaver(&dir, "abc", vec!["abc".into()]).unwrap().id, "abc");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -124,14 +136,14 @@ mod tests {
         // still what is handed back, so that the weaver is asked and says
         // why it cannot answer, rather than a wrong blob being opened.
         let dir = blobs("weaver-only", &["abc.spblob", "abc.weaver", "abc.pwd"]);
-        assert_eq!(beside_the_weaver(&dir, "abc", vec!["abc".into()]).unwrap(), "abc");
+        assert_eq!(beside_the_weaver(&dir, "abc", vec!["abc".into()]).unwrap().id, "abc");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn the_blob_bound_beside_the_weaver_is_taken_when_there_is_one() {
         let dir = blobs("weaver-beside", &["abc.spblob", "abc.weaver", "abc.pwd", "def.spblob", "def.secdis", "def.pwd"]);
-        assert_eq!(beside_the_weaver(&dir, "abc", vec!["abc".into(), "def".into()]).unwrap(), "def");
+        assert_eq!(beside_the_weaver(&dir, "abc", vec!["abc".into(), "def".into()]).unwrap().id, "def");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -139,7 +151,7 @@ mod tests {
     fn a_second_blob_without_both_of_the_files_the_old_way_needs_is_not_taken() {
         let dir = blobs("weaver-short", &["abc.spblob", "abc.weaver", "def.spblob", "def.secdis"]);
         assert_eq!(
-            beside_the_weaver(&dir, "abc", vec!["abc".into(), "def".into()]).unwrap(),
+            beside_the_weaver(&dir, "abc", vec!["abc".into(), "def".into()]).unwrap().id,
             "abc",
             "no recorded credential means the credential service has none to check"
         );
@@ -150,10 +162,33 @@ mod tests {
     fn a_second_blob_bound_to_a_weaver_too_is_not_taken() {
         let dir = blobs("weaver-both", &["abc.spblob", "abc.weaver", "def.spblob", "def.weaver", "def.secdis", "def.pwd"]);
         assert_eq!(
-            beside_the_weaver(&dir, "abc", vec!["abc".into(), "def".into()]).unwrap(),
+            beside_the_weaver(&dir, "abc", vec!["abc".into(), "def".into()]).unwrap().id,
             "abc",
             "a weaver the recovery cannot reach guards the second blob just as it does the first"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_phone_that_kept_no_way_round_the_weaver_says_so_before_the_weaver_is_asked() {
+        // The phone this came from: the owner's blob is bound to a weaver,
+        // and nothing beside it can be opened in a recovery. What is said
+        // goes to the phone's log, so that the failure that follows reads
+        // with its reason rather than as a wrong credential.
+        let dir = blobs("weaver-nofallback", &["abc.spblob", "abc.weaver", "abc.pwd"]);
+        let chosen = beside_the_weaver(&dir, "abc", vec!["abc".into()]).unwrap();
+        assert_eq!(chosen.id, "abc", "the recorded blob is still what is asked for");
+        let said = chosen.said.expect("the phone's log is told what was kept");
+        assert!(said.contains("bound to a weaver"), "{said}");
+        assert!(said.contains("abc (blob, weaver slot, pwd)"), "the blobs the phone kept, as they are: {said}");
+        assert!(said.contains("cannot be opened in a recovery"), "{said}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_blob_opened_without_a_weaver_says_nothing() {
+        let dir = blobs("plain-quiet", &["abc.spblob", "abc.secdis", "abc.pwd"]);
+        assert_eq!(beside_the_weaver(&dir, "abc", vec!["abc".into()]).unwrap().said, None, "nothing worth a line");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

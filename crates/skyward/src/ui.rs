@@ -1101,7 +1101,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let fonts = Fonts::load(font, 0, mono)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
     let (w, h) = surface.size();
-    eprintln!("display {}", surface.describe());
+    // What the display was set up as goes to the phone's log: the format the
+    // pixels are handed over in, and the planes they go through, which is
+    // what a wrong colour on the panel is read from.
+    skyward_sys::kmsg(&format!("display {}", surface.describe()))?;
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
