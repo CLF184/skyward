@@ -105,14 +105,22 @@ user = "system"
 groups = ["system", "drmrpc"]
 
 # 4. Gatekeeper 凭证验证服务
-# Not the Rust one: this build ships the C one, run as system in system.
-# libqtigatekeeper is in the vendor partition's hw folder, where the phone
-# keeps the half of a HAL that its own init script adds to the search path.
+# Not the Rust one: this build ships the C one, run as root as the phone's own
+# recovery runs it. libqtigatekeeper is in the vendor partition's hw folder,
+# where the phone keeps the half of a HAL that its own init script adds to the
+# search path.
+#
+# Root, where the stock rc says system: that rc is only reached once init has
+# turned the service on with a property, and this recovery starts the program
+# itself instead. The trustlet behind libqtigatekeeper is reached through
+# QSEECom, and a program that cannot open it answers every call as though the
+# secure world had taken the credential and written no note for the key
+# service -- which is what this phone did while it ran as system.
 [[service]]
 path = "/vendor/bin/hw/android.hardware.gatekeeper-service-qti"
 libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
 ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
-user = "system"
+user = "root"
 groups = ["system"]
 
 # 5. 安全元件服务
