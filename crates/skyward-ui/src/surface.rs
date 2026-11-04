@@ -623,9 +623,10 @@ pub mod kms {
                     get("CRTC_H"),
                 ));
             }
+            let crtc_props_now = Props::read(&card, crtc).context("read CRTC properties")?;
             let crtc_colour = ["GAMMA_LUT", "DEGAMMA_LUT", "CTM", "COLOR_ENCODING", "COLOR_RANGE"]
                 .iter()
-                .map(|n| format!("{n}={}", Props::read(&card, crtc)?.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
+                .map(|n| format!("{n}={}", crtc_props_now.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
                 .collect::<Vec<_>>()
                 .join(",");
             let summary = format!(
