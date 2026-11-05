@@ -645,12 +645,15 @@ pub mod kms {
             if layout.dsc {
                 let (id, _) = conn_props.get("dsc_mode")?;
                 req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
-                if let Some(bpp) = layout.bpp {
-                    if let Ok((id, _)) = conn_props.get("bpp_mode") {
-                        let choice = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp);
-                        if let Ok(choice) = choice {
-                            req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
-                        }
+                // A mode whose description names no rate is driven at the one
+                // these panels are made for, 12 bits a pixel: driven at another
+                // one, it is decompressed with the wrong arithmetic, and the
+                // panel shows the picture with its channels mangled rather
+                // than its geometry wrong.
+                let bpp = layout.bpp.unwrap_or(2);
+                if let Ok((id, _)) = conn_props.get("bpp_mode") {
+                    if let Ok(choice) = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp) {
+                        req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
                     }
                 }
             }
@@ -743,7 +746,7 @@ pub mod kms {
                 .collect::<Vec<_>>()
                 .join(",");
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, crtc {crtc_colour};{told}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, bpp {:?}, crtc {crtc_colour};{told}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
@@ -751,6 +754,7 @@ pub mod kms {
                 u32::from(crtc),
                 fourcc,
                 layout.dsc,
+                layout.bpp,
             );
             Ok(KmsSurface { card, bufs, back: 1, flipping: false, planes, w, h, order, summary })
         }
