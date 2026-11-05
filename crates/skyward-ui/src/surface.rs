@@ -574,12 +574,12 @@ pub mod kms {
                     _ => offered.push_str(&format!(" {name}={value}")),
                 }
             }
-            let layout = match conn_props.get("mode_properties") {
+            let (layout, mode_text) = match conn_props.get("mode_properties") {
                 Ok((_, blob)) => {
-                    let text = card.get_property_blob(blob).context("read mode_properties")?;
-                    SdeMode::find(&String::from_utf8_lossy(&text), &mode.name().to_string_lossy())?
+                    let text = String::from_utf8_lossy(&card.get_property_blob(blob).context("read mode_properties")?).into_owned();
+                    (SdeMode::find(&text, &mode.name().to_string_lossy())?, text)
                 }
-                Err(_) => SdeMode { mixers: 1, dsc: false, bpp: None },
+                Err(_) => (SdeMode { mixers: 1, dsc: false, bpp: None }, String::new()),
             };
             // One plane per layer mixer, each covering its own strip, which is
             // how this phone's own recovery drives the same mode: two planes,
@@ -669,6 +669,17 @@ pub mod kms {
                     .find_map(|name| enum_value(&card, id, name).ok())
                     .ok_or_else(|| anyhow!("the panel offers no dsc mode"))?;
                 req.add_property(conn.handle(), id, property::Value::UnsignedRange(dsc));
+                // The topology the mode is made for, named as the mode's own
+                // description names it: the connector's default is none, and a
+                // picture blended across the pipes as anything else reaches
+                // the glass with its channels mangled.
+                if let Ok((id, _)) = conn_props.get("topology_name") {
+                    if let Some(name) = mode_text.lines().find_map(|line| line.strip_prefix("topology=")).filter(|t| !t.is_empty()) {
+                        if let Ok(choice) = enum_value(&card, id, name) {
+                            req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
+                        }
+                    }
+                }
                 // A mode whose description names no rate is driven at the one
                 // these panels are made for, 12 bits a pixel: driven at another
                 // one, it is decompressed with the wrong arithmetic, and the
@@ -679,8 +690,9 @@ pub mod kms {
                 // buffer holds. Told 30, the link packs ten bits a channel out
                 // of eight, and the panel shows the picture with its colours
                 // mangled though its geometry is right.
+                let bpp = layout.bpp.unwrap_or(2);
                 if let Ok((id, _)) = conn_props.get("bpp_mode") {
-                    if let Ok(choice) = enum_choice(&card, id, &["dsi_24bpp"], 1) {
+                    if let Ok(choice) = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp) {
                         req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
                     }
                 }
