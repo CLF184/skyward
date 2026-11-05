@@ -23,6 +23,11 @@ const RATE: u32 = 8000;
 /// these phones carry.
 const NOMINAL_HZ: f32 = 172.4;
 
+/// How long a click is taken to run when the driver plays a waveform it
+/// keeps without saying how long that waveform is. The length only says when
+/// to take the effect away, and one left behind is erased by the next click.
+const NOMINAL_CLICK: Duration = Duration::from_millis(20);
+
 /// A made click: swings of the motor at its resonant frequency that drive
 /// it, then swings turned over that stop it, so that it does not ring on.
 const DRIVE_SWINGS: f32 = 2.0;
@@ -337,8 +342,15 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
         Click::Kept(id) => {
             let [_, seconds, millis] = kept;
             let length = Duration::from_secs(u64::try_from(seconds)?) + Duration::from_millis(u64::try_from(millis)?);
-            ensure!(!length.is_zero(), "the driver loaded waveform {id} without saying how long it plays");
-            length
+            // A driver that plays the waveform but says nothing of its length
+            // would otherwise be read as one that loaded nothing, and a click
+            // that never loads is what ends the recovery that asked for it.
+            if length.is_zero() {
+                eprintln!("haptics: the driver loaded waveform {id} without saying how long it plays; {NOMINAL_CLICK:?} is taken");
+                NOMINAL_CLICK
+            } else {
+                length
+            }
         }
         // The queue is full before the samples start playing.
         Click::Made(made) => Duration::from_secs_f64(made.len() as f64 / f64::from(RATE)),
