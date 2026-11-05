@@ -641,7 +641,7 @@ pub mod kms {
             // recovery set by hand instead -- the rate, the topology -- the
             // driver refused outright, and the rest left the picture with its
             // colours mangled.
-            card.set_crtc(crtc, Some(bufs[0].fb), (0, 0), &[conn.handle()], Some(mode)).context("set the panel mode")?;
+            card.set_crtc(crtc, Some(bufs[0].fb), (0, 0), &[conn.handle()], Some(*preferred)).context("set the panel mode")?;
             // The plane the driver put the buffer on: the flips that follow
             // change its framebuffer alone, never the pipeline under it.
             let mut planes: Vec<(plane::Handle, property::Handle)> = Vec::new();
