@@ -521,13 +521,23 @@ pub mod kms {
             // The fastest refresh at the preferred size, the first listed among
             // equals: Android scrolls at it, and the 13 Ultra's touch reports
             // come at the same 120 Hz.
+            // The compressed modes are where the colours go wrong: what the
+            // driver hands the panel is not what the panel decodes, and the
+            // picture comes out with its colours mangled though its geometry
+            // is right. The lower resolution is below what the link carries
+            // without compressing, and the phone's own recovery draws there.
             let mode = *conn
                 .modes()
                 .iter()
-                .filter(|m| m.size() == preferred.size())
-                .rev()
-                .max_by_key(|m| m.vrefresh())
-                .expect("the preferred mode itself has the preferred size");
+                .find(|m| m.name().to_string_lossy() == "1080x2400x60cmd")
+                .unwrap_or_else(|| {
+                    conn.modes()
+                        .iter()
+                        .filter(|m| m.size() == preferred.size())
+                        .rev()
+                        .max_by_key(|m| m.vrefresh())
+                        .expect("the preferred mode itself has the preferred size")
+                });
             let (w, h) = (mode.size().0 as u32, mode.size().1 as u32);
 
             // The CRTC already driving the panel, or the first one an
