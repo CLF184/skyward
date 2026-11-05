@@ -1100,6 +1100,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0, mono)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
+    let _ = std::fs::write("/tmp/display.txt", surface.describe());
     {
         // The kernel takes no more than 1024 bytes a write to /dev/kmsg,
         // and what the panel was told outgrew that: written in pieces,
