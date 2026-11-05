@@ -632,11 +632,34 @@ pub mod kms {
             let blob = card.create_property_blob(&mode).context("create mode blob")?;
             let first = card.create_property_blob(preferred).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
-            // The connector's `dsc_mode`, `bpp_mode` and `frame_trigger_mode`
-            // are left at what the driver chose for the mode, as this phone's
-            // own recovery (YARP) leaves them: it never sets any of the
-            // three, and its colours come out right on haotian's panel while
-            // ours, with all three set, showed blue as magenta.
+            // The mode is DSC-compressed: select its variant, as Android's
+            // compositor does, and give the compressor the rate the mode was
+            // made for. The rate is the panel's own: compressed at another
+            // one it is decompressed with the wrong arithmetic, and what
+            // reaches the glass is the picture with its colours mangled.
+            //
+            // The connector numbers the rate as an enumeration, so the number
+            // the mode's description carries is looked up among the choices
+            // rather than written straight in, and a connector that does not
+            // offer it is left as it is.
+            if layout.dsc {
+                let (id, _) = conn_props.get("dsc_mode")?;
+                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
+                if let Some(bpp) = layout.bpp {
+                    if let Ok((id, _)) = conn_props.get("bpp_mode") {
+                        let choice = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp);
+                        if let Ok(choice) = choice {
+                            req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
+                        }
+                    }
+                }
+            }
+            // Frame starts are posted to the hardware: the driver's own
+            // default on display hardware of this generation, and Android's
+            // compositor sets the same.
+            if let Ok((id, _)) = conn_props.get("frame_trigger_mode") {
+                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "posted_start")?));
+            }
             req.add_property(crtc, crtc_props.handle("MODE_ID")?, first);
             req.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(true));
             for &other in attached.iter().filter(|&&p| !candidates.iter().any(|c| c.0 == p)) {
@@ -720,7 +743,7 @@ pub mod kms {
                 .collect::<Vec<_>>()
                 .join(",");
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {} (mode's rate {:?}, left to the driver), crtc {crtc_colour};{told}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, crtc {crtc_colour};{told}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
@@ -728,7 +751,6 @@ pub mod kms {
                 u32::from(crtc),
                 fourcc,
                 layout.dsc,
-                layout.bpp,
             );
             Ok(KmsSurface { card, bufs, back: 1, flipping: false, planes, w, h, order, summary })
         }
