@@ -584,10 +584,12 @@ pub mod kms {
             // One plane per layer mixer, each covering its own strip, which is
             // how this phone's own recovery drives the same mode: two planes,
             // 720 wide each, one at x=0 and one at x=720.
-            let strips = layout.mixers as usize;
-            if w % layout.mixers != 0 {
-                return Err(anyhow!("{w} pixels do not split into {strips} strips"));
-            }
+            // One plane across the whole width: the layer mixers of a merge
+            // topology split what it holds between them, and the compressor
+            // takes the picture as one. Two planes, each composited on its
+            // own half, reach the glass with the geometry right and the
+            // colours mangled.
+            let strips = 1usize;
 
             // Primary planes that can drive the CRTC, those already on it
             // first so the boot splash's planes are reused; planes on the
@@ -692,7 +694,7 @@ pub mod kms {
                 req.add_property(other, props.handle("FB_ID")?, property::Value::Framebuffer(None));
                 req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
             }
-            let strip = w / layout.mixers;
+            let strip = w;
             let mut planes = Vec::new();
             for (i, (plane, _, props, _)) in candidates.iter().enumerate() {
                 let x = strip * i as u32;
