@@ -634,7 +634,7 @@ pub mod kms {
 
             let make = || -> Result<Buf> {
                 let db = card.create_dumb_buffer((w, h), fourcc, 32).context("create dumb buffer")?;
-                let fb = card.add_planar_framebuffer(&Planar(&db), FbCmd2Flags::empty()).context("add framebuffer")?;
+                let fb = card.add_framebuffer(&db, 24, 32).context("add framebuffer")?;
                 let len = buffer::Buffer::pitch(&db) as usize * h as usize;
                 let offset = drm_ffi::mode::dumbbuffer::map(card.as_fd(), buffer::Buffer::handle(&db).into(), 0, 0).context("map dumb buffer")?.offset;
                 let fd = card.as_fd().as_raw_fd();
