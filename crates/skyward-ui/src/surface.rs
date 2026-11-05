@@ -186,7 +186,6 @@ pub mod kms {
     use std::collections::HashMap;
     use std::fs::{File, OpenOptions};
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
-    use std::path::Path;
     use std::time::{Duration, Instant};
 
     /// How long the display may take to complete a commit.

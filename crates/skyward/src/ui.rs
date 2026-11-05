@@ -28,7 +28,7 @@ use skyward_block::usb::{self, Drive};
 use skyward_net::download::{self, Failure};
 use skyward_net::http::Servers;
 use skyward_net::release::{Installed, Release, Unanswered};
-use skyward_net::wlan::{Power as WlanPower, Wlan};
+use skyward_net::wlan::Power as WlanPower;
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
     FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
@@ -1326,18 +1326,39 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     }
     // The DNS servers the network joined gave, for looking names up.
     let servers: Servers = Arc::new(Mutex::new(Vec::new()));
-    // The WLAN, on a phone whose driver the recovery brings up; it starts
-    // off. Without the bundle of the vendor interface's libraries the
-    // supplicant does not start, and the WLAN page says why.
+    // The WLAN, on a phone whose driver the recovery brings up. It comes up
+    // with the recovery rather than waiting for the switch on its page, as
+    // the phone's own system brings its WLAN up at boot: the page then shows
+    // the radio coming up instead of a switch that is off. None of this is
+    // what shows the pages, so a phone whose WLAN cannot be brought up still
+    // works, and why it could not goes to the kernel log — as a radio that
+    // fails once tried says why on its own page.
     let wlan = match &cfg.wlan {
         Some(w) => {
-            app.state.wlan = Some(Wlan::default());
-            let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
-            let libraries = secure::libraries().unwrap_or_else(|e| {
-                let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
-                None
-            });
-            Some(wlan::Worker::start(w.clone(), modules, libraries, servers.clone())?)
+            let started = (|| -> Result<wlan::Worker> {
+                let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+                // Without the bundle of the vendor interface's libraries the
+                // supplicant does not start, and the WLAN page says why.
+                let libraries = secure::libraries().unwrap_or_else(|e| {
+                    let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
+                    None
+                });
+                wlan::Worker::start(w.clone(), modules, libraries, servers.clone())
+            })();
+            match started {
+                Ok(worker) => {
+                    app.start_wlan();
+                    worker.send(wlan::Command::On);
+                    Some(worker)
+                }
+                // With no thread to tell how the radio stands, the page is
+                // not offered at all, as on a phone the recovery brings no
+                // WLAN up for.
+                Err(e) => {
+                    let _ = skyward_sys::kmsg(&format!("the WLAN is not brought up: {e:#}"));
+                    None
+                }
+            }
         }
         None => None,
     };
