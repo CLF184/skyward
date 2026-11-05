@@ -635,120 +635,27 @@ pub mod kms {
                 Ok(Buf { db, fb, map: map.cast(), len })
             };
             let bufs = [make()?, make()?, make()?];
-
-            let crtc_id = u64::from(u32::from(crtc));
-            let mut req = atomic::AtomicModeReq::new();
-            for &other in res.connectors().iter().filter(|&&c| c != conn.handle()) {
-                let props = Props::read(&card, other)?;
-                if props.value("CRTC_ID")? == crtc_id {
-                    req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
+            // The panel is driven the way the phone's own recovery drives it:
+            // a plain set-crtc, which lets the driver work out the DSC rate,
+            // the topology and the compression from the mode itself. What this
+            // recovery set by hand instead -- the rate, the topology -- the
+            // driver refused outright, and the rest left the picture with its
+            // colours mangled.
+            card.set_crtc(crtc, Some(bufs[0].fb), (0, 0), &[conn.handle()], Some(mode)).context("set the panel mode")?;
+            // The plane the driver put the buffer on: the flips that follow
+            // change its framebuffer alone, never the pipeline under it.
+            let mut planes: Vec<(plane::Handle, property::Handle)> = Vec::new();
+            for p in card.plane_handles().context("list planes")? {
+                let info = card.get_plane(p).context("read plane")?;
+                let props = Props::read(&card, p)?;
+                if info.crtc() == Some(crtc) && props.value("type")? == PlaneType::Primary as u64 {
+                    let fb_prop = props.handle("FB_ID")?;
+                    planes.push((p, fb_prop));
+                    break;
                 }
             }
-            let crtc_props = Props::read(&card, crtc)?;
-            let blob = card.create_property_blob(&mode).context("create mode blob")?;
-            let first = card.create_property_blob(preferred).context("create mode blob")?;
-            req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
-            // The mode is DSC-compressed: select its variant, as Android's
-            // compositor does, and give the compressor the rate the mode was
-            // made for. The rate is the panel's own: compressed at another
-            // one it is decompressed with the wrong arithmetic, and what
-            // reaches the glass is the picture with its colours mangled.
-            //
-            // The connector numbers the rate as an enumeration, so the number
-            // the mode's description carries is looked up among the choices
-            // rather than written straight in, and a connector that does not
-            // offer it is left as it is.
-            if layout.dsc {
-                let (id, _) = conn_props.get("dsc_mode")?;
-                // A merge topology compresses the whole width across both
-                // pipes and the panel decodes it once; each pipe compressed on
-                // its own reaches the glass as one picture whose channels are
-                // mangled though its geometry is right.
-                let dsc = ["dsc_merge_enabled", "dsc_enabled"]
-                    .iter()
-                    .find_map(|name| enum_value(&card, id, name).ok())
-                    .ok_or_else(|| anyhow!("the panel offers no dsc mode"))?;
-                req.add_property(conn.handle(), id, property::Value::UnsignedRange(dsc));
-                // The topology the mode is made for, named as the mode's own
-                // description names it: the connector's default is none, and a
-                // picture blended across the pipes as anything else reaches
-                // the glass with its channels mangled.
-                if let Ok((id, _)) = conn_props.get("topology_name") {
-                    if let Some(name) = mode_text.lines().find_map(|line| line.strip_prefix("topology=")).filter(|t| !t.is_empty()) {
-                        if let Ok(choice) = enum_value(&card, id, name) {
-                            req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
-                        }
-                    }
-                }
-                // A mode whose description names no rate is driven at the one
-                // these panels are made for, 12 bits a pixel: driven at another
-                // one, it is decompressed with the wrong arithmetic, and the
-                // panel shows the picture with its channels mangled rather
-                // than its geometry wrong.
-                // The connector's rate is the link's bits a pixel, not the
-                // compressor's: `dsi_24bpp` is the eight bits a channel this
-                // buffer holds. Told 30, the link packs ten bits a channel out
-                // of eight, and the panel shows the picture with its colours
-                // mangled though its geometry is right.
-                let bpp = layout.bpp.unwrap_or(2);
-                if let Ok((id, _)) = conn_props.get("bpp_mode") {
-                    if let Ok(choice) = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp) {
-                        req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
-                    }
-                }
-            }
-            // Frame starts are posted to the hardware: the driver's own
-            // default on display hardware of this generation, and Android's
-            // compositor sets the same.
-            if let Ok((id, _)) = conn_props.get("frame_trigger_mode") {
-                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "posted_start")?));
-            }
-            req.add_property(crtc, crtc_props.handle("MODE_ID")?, first);
-            req.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(true));
-            for &other in attached.iter().filter(|&&p| !candidates.iter().any(|c| c.0 == p)) {
-                let props = Props::read(&card, other)?;
-                req.add_property(other, props.handle("FB_ID")?, property::Value::Framebuffer(None));
-                req.add_property(other, props.handle("CRTC_ID")?, property::Value::CRTC(None));
-            }
-            let strip = w;
-            let mut planes = Vec::new();
-            for (i, (plane, _, props, _)) in candidates.iter().enumerate() {
-                let x = strip * i as u32;
-                let fb_prop = props.handle("FB_ID")?;
-                req.add_property(*plane, fb_prop, property::Value::Framebuffer(Some(bufs[0].fb)));
-                req.add_property(*plane, props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
-                req.add_property(*plane, props.handle("SRC_X")?, property::Value::UnsignedRange((x as u64) << 16));
-                req.add_property(*plane, props.handle("SRC_Y")?, property::Value::UnsignedRange(0));
-                req.add_property(*plane, props.handle("SRC_W")?, property::Value::UnsignedRange((strip as u64) << 16));
-                req.add_property(*plane, props.handle("SRC_H")?, property::Value::UnsignedRange((h as u64) << 16));
-                req.add_property(*plane, props.handle("CRTC_X")?, property::Value::SignedRange(x as i64));
-                req.add_property(*plane, props.handle("CRTC_Y")?, property::Value::SignedRange(0));
-                req.add_property(*plane, props.handle("CRTC_W")?, property::Value::UnsignedRange(strip as u64));
-                req.add_property(*plane, props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
-                // How the panel is told to read the pixels: this phone's own
-                // recovery drives it as ITU-R BT.601 YCbCr in its limited
-                // range, and a plane left at the driver's default is what
-                // showed blue as magenta. Said as the connector's own
-                // enumerations, and only where the connector offers them.
-                if let Some((what, choice)) = colour_encoding(&card, props) {
-                    req.add_property(*plane, what, property::Value::UnsignedRange(choice));
-                }
-                if let Some((what, choice)) = colour_range(&card, props) {
-                    req.add_property(*plane, what, property::Value::UnsignedRange(choice));
-                }
-                planes.push((*plane, fb_prop));
-            }
-            // The panel comes up in its preferred mode, then switches to the
-            // fastest. Powered up in the fast mode directly, the display
-            // controller runs at the fast rate but the panel keeps its own:
-            // the 13 Ultra's sends its TE at 60 Hz, and every frame waits two
-            // TEs. Switching a running panel sends it the commands for the
-            // new rate, as Android's switches do.
-            commit(&card, req, AtomicCommitFlags::ALLOW_MODESET).context("set the panel mode")?;
-            if mode.vrefresh() != preferred.vrefresh() {
-                let mut req = atomic::AtomicModeReq::new();
-                req.add_property(crtc, crtc_props.handle("MODE_ID")?, blob);
-                commit(&card, req, AtomicCommitFlags::ALLOW_MODESET).context("switch the panel to its fastest refresh")?;
+            if planes.is_empty() {
+                return Err(anyhow!("the panel's buffer is on no primary plane"));
             }
 
             let ids: Vec<u32> = planes.iter().map(|p| u32::from(p.0)).collect();
