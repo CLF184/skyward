@@ -64,15 +64,18 @@ If a file has to outlive a start, it goes on persist as a small marker only.
 
 ## What the display needs on `haotian` (Xiaomi 15 Pro, sm8750)
 
-Found by comparing against YARP's live DRM state. All of these matter:
+Found by comparing against YARP's live DRM state. The format and the planes are
+what both recoveries scan out. The properties under them were set to match
+YARP, and changing them did not move the colours at all — the open problem
+below says how that was measured.
 
 | What | Value | Why |
 | --- | --- | --- |
 | Format | `XB24` (`Xbgr8888`), first in `SCANOUT` | what the phone's own recovery hands over |
 | Planes | one per layer mixer, 720 wide each | `sde_dualpipe_dscmerge` topology |
-| `bpp_mode` | `2` (12 bits a pixel), from `mode_properties` | driven at 8 the panel decompresses with the wrong arithmetic |
+| `bpp_mode` | `2` (12 bits a pixel), from `mode_properties` | the rate the mode's own description names |
 | `dsc_mode` | `dsc_enabled` | the mode is compressed |
-| `COLOR_ENCODING` | `ITU-R BT.601 YCbCr` | otherwise the plane hands pixels over unconverted |
+| `COLOR_ENCODING` | `ITU-R BT.601 YCbCr` | what both recoveries' state reads; the planes here expose no such property |
 | `COLOR_RANGE` | `YCbCr limited range` | same |
 
 `bpp_mode`, `COLOR_ENCODING` and `COLOR_RANGE` are **enumerations on the
@@ -86,17 +89,89 @@ topology, DSC flag and rate out of the connector's `mode_properties` blob.
 ### Known open problem: colours on the pages
 
 On `haotian` the pages still show blue as magenta and red as near black, and
-**this is not yet explained**. What has been ruled out, by measurement:
+**this is not yet explained**. Every frame is wrong, from the very first one
+Skyward puts on the glass: the first photograph of the panel is already of a
+mangled picture, so no later flip, stale buffer or hand-over between two
+buffers can account for it. That first frame was also dumped on both sides of
+the hand-over, and the canvas and the scanout buffer are **byte for byte
+identical** — the buffer holds exactly the values the pages drew. The system's
+own screenshot — a readback of the framebuffer, not a photograph — is correct
+as well, so the values are right at least as far as the memory the display
+controller reads.
 
-- The canvas holds exactly the right values (dumped from the running recovery).
-- The canvas and the scanout buffer are **byte for byte identical**.
-- The DRM state matches YARP's property for property.
-- Pure-colour bands drawn through the same `present()` come out **correct**,
-  including `(52,130,255)` — which the home page's tiles show as magenta.
+What the glass then does with them was read off photographs of two pages. The
+rule that fits is this: the panel's red and its blue both take the buffer's
+blue byte, and its green takes the green one — `(R, G, B)` in the buffer
+arrives as `(B, G, B)`. That is why blue turns magenta, why red keeps only the
+green it had and reads as near black, why green, white and black come through
+unchanged, and why `(52,130,255)` on the home page's tiles shows as magenta.
+`target/color-debug/panel-rule.py` holds the pairs and checks the rule against
+all eight of them. Seven agree. The eighth is the text ink, black in the buffer
+and black on the glass, where the two disagree only about what to call it.
 
-That last point is the crux and it does not fit any channel-order or
-format explanation. Anyone starting here should get a *photograph* of a test
-pattern beside a *photograph* of a page before changing anything.
+**An earlier version of this section claimed pure-colour bands came out
+correct. That was wrong, and it is worth saying so plainly, because it sent an
+attempt in the wrong direction.** A later photograph of the terminal page's
+ANSI colour bars — green, magenta, white, cyan, blue and grey bands, put on
+screen by the terminal's own drawing rather than by a hand-built test pattern
+— showed those bands arriving wrong as well, and the rule above explains them.
+So the fault is neither about pages as opposed to patterns nor about a colour
+blended over another as opposed to one written straight in; the experiment
+that distinguished those (`660e497`) has no answer to give. Every frame is
+affected, and so is every way of drawing into one.
+
+Ruled out, by measurement:
+
+- **The display controller's registers.** A full SDE dump, through
+  `/sys/kernel/debug/dri/0/debug`: set `panic` to 0 first, since a dump with
+  panic on can crash the kernel, then `echo 1 > dump` and read
+  `recovery_reg`. Skyward's dump and YARP's are identical word for word
+  except in table RAM — the DSPP blocks, the blur LUT and the gamut blocks —
+  and a handful of interface counters. Two captures of YARP's own running
+  recovery differ from each other by as much, in the same places.
+- **The DSI controller's registers, and the porch timings**, read the same way.
+- **The panel's DCS registers**, read back through
+  `/proc/mi_display/mipi_rw_prim` and compared with YARP's; nothing in what
+  the panel reports explains a channel swap. Sending the panel its whole
+  on-command set again (221 of them) and its PPS changed nothing.
+- **The backlight path**, all three of them: the `panel0-backlight` sysfs
+  node, `mi_display`'s `brightness_clone`, and a direct DCS `0x51`.
+- **The kernel.** `/proc/version` and `msm_drm.ko` are identical to YARP's,
+  and the loaded module set differs only in the wifi, audio, camera, nfc, gpu
+  and video modules.
+- **How the panel is started.** Both recoveries come up through the
+  bootloader's splash handoff (`cont_splash`), with no panel on-command at
+  start.
+
+Tried, and none of it moved the colours:
+
+- `bpp_mode` taken from the mode's own `mode_properties` (`2e55328`).
+- `COLOR_ENCODING` and `COLOR_RANGE` (`e902e11`); on this phone the planes do
+  not expose them, so there is nothing to set.
+- `XRGB8888` first (`b930c31`), a resolution the mode does not compress
+  (`eac6dd8`), one plane across the whole width (`9fc8682`).
+- Leaving `dsc_mode`, `bpp_mode` and `frame_trigger_mode` to the driver
+  (`9148774`, reverted in `b7e94e4`).
+
+What has **not** been tried is the way Skyward presents. Skyward sets the panel
+up in its preferred mode and then switches it to 120 Hz; it draws into three
+dumb buffers in turn, and flips with a non-blocking commit that waits for the
+flip event. YARP sets the target mode in a single commit and blocks on it. None
+of that difference has been flashed and measured — a control build shaped like
+YARP was designed and never went on the phone. It is the last difference
+measurable from outside the panel that is left, and it is a difference in how
+the panel is driven rather than in what it is given, so it is where the next
+attempt should start.
+
+The evidence is in `target/color-debug/`: the canvas and scanout dumps
+(`frame-*`, `live-*`, `sw-*`, `canvas-new` and `scanout-new`), the DRM state
+snapshots, `yarp-drm/` for YARP's side, `regs/regs-skyward`,
+`regs/regs-yarp-on` and `regs/regs-yarp-idle` for the register dumps, and
+`panel-skyward.txt` beside `panel-yarp.txt` for the DCS readbacks. The scripts
+that took them are `regs.sh` and `panel.sh` at the top of the tree, and
+`target/lutdiff.py` and `target/unpack_img.py` for reading the dumps back.
+None of it is committed — `target/` is a build directory — so it exists only
+on the machine that measured it.
 
 ## The credential services
 

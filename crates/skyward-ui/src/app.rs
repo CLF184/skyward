@@ -1966,9 +1966,10 @@ enum Drag {
     /// the editor's text, `carry` being the part of a row not yet scrolled.
     History { last: f32, carry: f32, pitch: f32 },
     Pattern,
-    /// The finger that lit the dark panel; nothing it does counts until it
-    /// lifts.
-    Waking,
+    /// A finger on the dark panel, from where it came down: dragged far
+    /// enough across the glass, it lights the panel, and nothing it does
+    /// counts until it lifts.
+    Waking { x: f32, y: f32 },
 }
 
 /// Where the keys are on a page.
@@ -2103,6 +2104,12 @@ const BACKLIGHT_STEP_MS: u64 = 8;
 /// second tap of a wake habit, or the hand reaching for a phone whose
 /// screen an install just lit, should not act. Android's double-tap window.
 const WAKE_GUARD_MS: u64 = 400;
+/// How far, in dp, a finger on the dark panel has to be swiped up to light
+/// it: a swipe, as YARP lights its screen, and not a tap. A hand reaching
+/// for the phone, or the glass knocked against something in a pocket, is
+/// no swipe and leaves the panel dark. Six times the touch slop, so a
+/// finger that shakes on the way down lights nothing.
+const WAKE_SWIPE_DP: f32 = 48.0;
 /// A volume key held this long moves the light again, then once every
 /// [`REPEAT_MS`], as the system repeats a key held.
 const REPEAT_DELAY_MS: u64 = 400;
@@ -2874,7 +2881,9 @@ impl App {
         self.bright.set(true, now);
     }
 
-    /// Light the panel, as if just touched.
+    /// Light the panel. A finger lights it by a swipe (see
+    /// [`App::touch`]); a key, or the runtime telling of something that
+    /// needs reading, lights it as it is.
     fn wake(&mut self, now: u64) {
         if !self.display_on {
             self.display_on = true;
@@ -2888,6 +2897,17 @@ impl App {
     /// keep it awake.
     fn just_woke(&self, now: u64) -> bool {
         self.woke_at.is_some_and(|w| now.saturating_sub(w) < WAKE_GUARD_MS)
+    }
+
+    /// Whether a finger that came down at `from` and is now at (`x`, `y`)
+    /// has been swiped up far enough to light the dark panel: up by
+    /// [`WAKE_SWIPE_DP`], as YARP is lit, and no great way sideways, so a
+    /// finger dragged across the glass is no swipe up. A finger on the dark
+    /// glass cannot see the page under it, so the way up is the one way
+    /// YARP asks for and this asks for too.
+    fn swiped(&self, (x0, y0): (f32, f32), x: f32, y: f32) -> bool {
+        let (dx, up) = ((x - x0).abs(), y0 - y);
+        up >= self.px_per_dp * WAKE_SWIPE_DP && up >= dx
     }
 
     /// Turn the panel off. A finger on the glass lets go of what it held,
@@ -3266,6 +3286,16 @@ impl App {
         if self.screen() == Screen::Installing {
             self.refresh();
         }
+    }
+
+    /// The phone has a WLAN, and the recovery brings it up as it starts, as
+    /// the phone's own system does: the page shows the radio coming up
+    /// rather than a switch that is off, and how it goes comes back with
+    /// [`App::set_wlan`]. A WLAN that does not come up says why on its page
+    /// and in the kernel log, and the other pages are not held up by it.
+    pub fn start_wlan(&mut self) {
+        self.state.wlan = Some(Wlan { power: Power::Starting, ..Wlan::default() });
+        self.refresh();
     }
 
     /// How the WLAN stands, as the runtime last told it.
@@ -5468,19 +5498,36 @@ impl App {
     }
 
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
+        // A finger on the dark panel lights it only by a swipe: swiped up
+        // the glass far enough it wakes the panel, as a swipe lights YARP's,
+        // and it does nothing else until it lifts. A tap, a hand resting on
+        // the phone, or the glass knocked in a pocket is no swipe, and the
+        // panel stays dark with the page under it untouched.
         if !self.display_on {
-            // A finger on the dark panel lights it, and does nothing else
-            // until it lifts.
-            if matches!(ev, Touch::Down(..)) {
-                self.wake(now);
-                self.drag = Drag::Waking;
+            match ev {
+                Touch::Down(x, y) => self.drag = Drag::Waking { x, y },
+                Touch::Move(x, y) => {
+                    if let Drag::Waking { x: x0, y: y0 } = self.drag {
+                        if self.swiped((x0, y0), x, y) {
+                            self.wake(now);
+                        }
+                    }
+                }
+                Touch::Up => self.drag = Drag::Idle,
             }
             return Vec::new();
         }
-        // A finger landing just after the panel lit only keeps it awake.
-        if matches!(ev, Touch::Down(..)) && self.just_woke(now) {
+        // A finger landing just after the panel lit only keeps it awake, as
+        // does each of the rest of the touches of the finger that lit it: the
+        // hand is still on the glass, over the page just put up.
+        let after = self.just_woke(now) || matches!(self.drag, Drag::Waking { .. });
+        if after {
             self.stir(now);
-            self.drag = Drag::Waking;
+            match ev {
+                Touch::Down(x, y) => self.drag = Drag::Waking { x, y },
+                Touch::Up => self.drag = Drag::Idle,
+                Touch::Move(..) => {}
+            }
             return Vec::new();
         }
         // A finger on the glass puts the keys' light out, whatever a key
@@ -5656,7 +5703,7 @@ impl App {
                     self.tracker.add(now, y);
                     self.drag = self.scroll_history(last, y, carry, pitch);
                 }
-                Drag::Waking => self.drag = Drag::Waking,
+                Drag::Waking { x, y } => self.drag = Drag::Waking { x, y },
                 Drag::Held => self.drag = Drag::Held,
                 Drag::Idle => {}
             },
@@ -9904,6 +9951,57 @@ mod tests {
     }
 
     #[test]
+    fn the_wlan_comes_up_with_the_recovery_rather_than_by_a_switch() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Open(Screen::Wlan)), "a phone whose WLAN is not brought up has no WLAN");
+        // The runtime starts the radio as the pages come up, saying so first.
+        app.start_wlan();
+        assert_eq!(fmt::wlan_value(Lang::Hans, app.state.wlan.as_ref().unwrap()), "正在开启");
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Open(Screen::Wlan)), "the WLAN is there from the first frame");
+        // Its page shows the radio coming up, and nothing to turn on: the
+        // switch already reads as on, so tapping it turns the radio off.
+        app.state.wlan = Some(Wlan { power: Power::Starting, ..Wlan::default() });
+        assert!(app.act(Action::Open(Screen::Wlan), 0).is_empty(), "a WLAN still coming up is not scanned");
+        assert_eq!(app.screen(), Screen::Wlan);
+        // Told it is up, the page shows what is in range and it is scanned.
+        app.set_wlan(Wlan { power: Power::On, networks: Vec::new(), joined: None });
+        assert_eq!(fmt::wlan_value(Lang::Hans, app.state.wlan.as_ref().unwrap()), "未连接");
+        assert_eq!(app.arrive(), vec![Effect::ScanWlan], "the page scans by itself once the radio is up");
+    }
+
+    #[test]
+    fn a_wlan_that_does_not_come_up_shows_why_and_leaves_the_pages_alone() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.start_wlan();
+        // The thread could not bring the radio up, and says why: the page
+        // carries the reason, and the pages around it go on as before.
+        app.set_wlan(Wlan { power: Power::Failed("no wlan0 in 20 seconds".into()), ..Wlan::default() });
+        assert_eq!(fmt::wlan_value(Lang::Hans, app.state.wlan.as_ref().unwrap()), "已关闭");
+        app.act(Action::Open(Screen::Wlan), 0);
+        assert_eq!(app.screen(), Screen::Wlan);
+        let t = app.theme();
+        let drawn = pages::render(Screen::Wlan, &Ctx { t: &t, f: &f, info: &i, state: &app.state, term: None, band: None });
+        assert!(drawn.canvas.data.iter().any(|&b| b != 0), "the WLAN page draws with no radio behind it");
+        assert_eq!(app.key(Key::Back, 0), Vec::<Effect>::new(), "leaving it costs nothing");
+        assert_eq!(app.screen(), Screen::Home, "the other pages are reachable");
+    }
+
+    #[test]
+    fn a_wlan_switch_still_turns_the_radio_off_and_on_after_it_came_up_by_itself() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.start_wlan();
+        app.set_wlan(Wlan { power: Power::On, networks: Vec::new(), joined: None });
+        app.act(Action::Open(Screen::Wlan), 0);
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(false)], "the switch still turns it off");
+        assert_eq!(app.state.wlan.as_ref().unwrap().power, Power::Off, "and says so at once");
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(true)], "and on again");
+        assert_eq!(app.state.wlan.as_ref().unwrap().power, Power::Starting);
+    }
+
+    #[test]
     fn the_wlan_page_joins_a_network_with_its_password_and_leaves_it() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
@@ -10550,19 +10648,96 @@ mod tests {
     }
 
     #[test]
-    fn a_touch_on_the_dark_panel_only_lights_it() {
+    fn a_tap_on_the_dark_panel_leaves_it_dark() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
         press(&mut app, Key::Power, 0);
+        assert!(!app.display_on());
+        // A hand reaching for the phone, a finger tapping the glass: no
+        // swipe, so the panel stays dark and the page under it is untouched.
         assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
-        assert_eq!(app.panel(100), Some(SLIDER_START));
-        assert!(app.touch(Touch::Move(x, y - 300.0), &f, 120).is_empty());
-        assert!(app.touch(Touch::Up, &f, 140).is_empty());
-        assert_eq!(app.screen(), Screen::Home, "the waking tap pressed nothing");
+        assert!(app.touch(Touch::Up, &f, 160).is_empty());
+        assert!(!app.display_on(), "a tap lights nothing");
+        assert_eq!(app.panel(160), None);
+        // A hand that shifts a little on the way down is no swipe either.
+        assert!(app.touch(Touch::Down(x, y), &f, 200).is_empty());
+        assert!(app.touch(Touch::Move(x + 30.0, y - 20.0), &f, 210).is_empty());
+        assert!(!app.display_on(), "a hand that shifts is no swipe");
+        assert!(app.touch(Touch::Up, &f, 220).is_empty());
+        assert_eq!(app.screen(), Screen::Home, "nothing on the page was pressed");
         assert_eq!(app.top().1, 0.0, "nor scrolled the page");
-        tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 600);
+    }
+
+    #[test]
+    fn a_swipe_on_the_dark_panel_lights_it_and_presses_nothing() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
+        let swipe = app.theme().m.dp(WAKE_SWIPE_DP);
+        press(&mut app, Key::Power, 0);
+        assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
+        // Short of the swipe, the panel stays dark.
+        assert!(app.touch(Touch::Move(x, y - (swipe - 10.0)), &f, 110).is_empty());
+        assert!(!app.display_on(), "a drag short of a swipe lights nothing");
+        // Dragged far enough, it lights the panel there and then.
+        assert!(app.touch(Touch::Move(x, y - (swipe + 10.0)), &f, 400).is_empty());
+        assert!(app.display_on(), "the swipe lit the panel");
+        assert_eq!(app.panel(400), Some(SLIDER_START), "at full brightness");
+        // The hand that swiped does nothing more as it lifts.
+        assert!(app.touch(Touch::Up, &f, 420).is_empty());
+        assert_eq!(app.screen(), Screen::Home, "the swiping finger pressed nothing");
+        assert_eq!(app.top().1, 0.0, "nor scrolled the page");
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 900);
         assert_eq!(app.screen(), Screen::Settings, "a tap past the guard does");
+    }
+
+    #[test]
+    fn a_swipe_up_lights_the_dark_panel_and_other_ways_do_not() {
+        let f = fonts();
+        let swipe = Theme::light(W, H, PPD).m.dp(WAKE_SWIPE_DP);
+        // The way YARP is lit: swiped up, the finger going up the glass.
+        let lights = [(0.0, -swipe - 10.0), (swipe * 0.4, -swipe - 10.0)];
+        for (dx, dy) in lights {
+            let mut app = App::new(Screen::Home, W, H, PPD);
+            press(&mut app, Key::Power, 0);
+            let (x, y) = (W as f32 / 2.0, H as f32 / 2.0);
+            app.touch(Touch::Down(x, y), &f, 0);
+            app.touch(Touch::Move(x + dx, y + dy), &f, 100);
+            assert!(app.display_on(), "a swipe of ({dx}, {dy}) lights the panel");
+        }
+        // A swipe down, or one mostly across the glass, is not the one YARP
+        // asks for, and leaves the panel dark.
+        let dark = [(0.0, swipe + 10.0), (swipe + 10.0, 0.0), (-swipe - 10.0, 0.0), (swipe + 10.0, -swipe - 5.0)];
+        for (dx, dy) in dark {
+            let mut app = App::new(Screen::Home, W, H, PPD);
+            press(&mut app, Key::Power, 0);
+            let (x, y) = (W as f32 / 2.0, H as f32 / 2.0);
+            app.touch(Touch::Down(x, y), &f, 0);
+            app.touch(Touch::Move(x + dx, y + dy), &f, 100);
+            assert!(!app.display_on(), "a drag of ({dx}, {dy}) is no swipe up");
+        }
+    }
+
+    #[test]
+    fn a_touch_just_after_the_swipe_only_keeps_the_panel_awake() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
+        press(&mut app, Key::Power, 0);
+        // A swipe lights the panel.
+        app.touch(Touch::Down(x, y), &f, 100);
+        app.touch(Touch::Move(x, y - 300.0), &f, 120);
+        assert!(app.display_on());
+        app.touch(Touch::Up, &f, 130);
+        // The hand comes straight back down on the row the swipe left under
+        // it: within the guard that only keeps the panel awake.
+        assert!(tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 300).is_empty());
+        assert_eq!(app.screen(), Screen::Home, "the stray touch pressed nothing");
+        assert!(app.display_on(), "and did not put the panel out either");
+        // Past the guard the same tap opens the page.
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 700);
+        assert_eq!(app.screen(), Screen::Settings);
     }
 
     #[test]
