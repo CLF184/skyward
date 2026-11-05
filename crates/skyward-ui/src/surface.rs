@@ -560,6 +560,20 @@ pub mod kms {
             // mixers, no DSC selection and the default trigger, the 13
             // Ultra's panel tore while scrolling.
             let conn_props = Props::read(&card, conn.handle())?;
+            // What the connector offers, in full: the names of its enum
+            // properties and the choices each gives, for the colour question.
+            let mut offered = String::new();
+            for (name, (id, value)) in conn_props.0.iter() {
+                let info = card.get_property(*id).context("read property")?;
+                match info.value_type() {
+                    property::ValueType::Enum(e) => {
+                        let (_, values) = e.values();
+                        let choices: Vec<String> = values.iter().map(|v| format!("{}={}", v.name().to_string_lossy(), v.value())).collect();
+                        offered.push_str(&format!(" {name}={value}[{}]", choices.join(",")));
+                    }
+                    _ => offered.push_str(&format!(" {name}={value}")),
+                }
+            }
             let layout = match conn_props.get("mode_properties") {
                 Ok((_, blob)) => {
                     let text = card.get_property_blob(blob).context("read mode_properties")?;
@@ -644,7 +658,15 @@ pub mod kms {
             // offer it is left as it is.
             if layout.dsc {
                 let (id, _) = conn_props.get("dsc_mode")?;
-                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
+                // A merge topology compresses the whole width across both
+                // pipes and the panel decodes it once; each pipe compressed on
+                // its own reaches the glass as one picture whose channels are
+                // mangled though its geometry is right.
+                let dsc = ["dsc_merge_enabled", "dsc_enabled"]
+                    .iter()
+                    .find_map(|name| enum_value(&card, id, name).ok())
+                    .ok_or_else(|| anyhow!("the panel offers no dsc mode"))?;
+                req.add_property(conn.handle(), id, property::Value::UnsignedRange(dsc));
                 // A mode whose description names no rate is driven at the one
                 // these panels are made for, 12 bits a pixel: driven at another
                 // one, it is decompressed with the wrong arithmetic, and the
@@ -746,7 +768,7 @@ pub mod kms {
                 .collect::<Vec<_>>()
                 .join(",");
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, bpp {:?}, crtc {crtc_colour};{told}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, bpp {:?}, crtc {crtc_colour};{told}connector{offered}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
