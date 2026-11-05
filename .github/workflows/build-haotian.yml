@@ -96,8 +96,8 @@ jobs:
       # Extract the motor firmware from the stock odm partition. It has to be
       # in the ramdisk before init's first probe; copying it after Skyward
       # starts is too late. The partition is loop-mounted and read, so only
-      # the one file is copied out of its several gigabytes. A runner whose
-      # kernel has no erofs falls back to the userspace reader.
+      # the files named are copied out of its several gigabytes. A runner
+      # whose kernel has no erofs falls back to the userspace reader.
       - name: Extract the motor firmware from the stock package
         run: |
           set -eu
@@ -110,18 +110,16 @@ jobs:
             echo "no erofs support in the kernel; reading it in userspace"
             fsck.erofs --extract=extracted --no-preserve --overwrite stock/odm.img
           fi
-          # The build names the file, not its folder: a stock build may keep it
-          # elsewhere, so find it instead of assuming firmware/.
-          found=$(find extracted -name cs40l26.wmfw -type f | head -n 1)
-          test -n "$found"
-          echo "took $found"
-          cp "$found" stock/cs40l26.wmfw
+          mkdir -p stock/firmware
+          for name in cs40l26.wmfw cs40l26.bin cs40l26-svc.bin cs40l26-dvl.bin cs40l26-dbc.bin cs40l26-a2h.bin; do
+            found=$(find extracted -name "$name" -type f | head -n 1)
+            test -n "$found"
+            cp "$found" "stock/firmware/$name"
+            echo "took $found"
+          done
           if [ "$mounted" = yes ]; then sudo umount extracted; fi
-          # The partition is several gigabytes and its only use here was the
-          # one file just taken from it.
           rm -rf extracted stock/odm.img
-          test -s stock/cs40l26.wmfw
-          ls -l stock/cs40l26.wmfw
+          ls -l stock/firmware
 
       - name: Pack the recovery
         id: pack
@@ -138,7 +136,12 @@ jobs:
             --font resources/fonts/MiSansVF.ttf \
             --mono resources/fonts/KirkMono-Regular.ttf \
             --mono-license resources/fonts/KirkMono-OFL.txt \
-            --firmware cs40l26.wmfw=stock/cs40l26.wmfw \
+            --firmware cs40l26.wmfw=stock/firmware/cs40l26.wmfw \
+            --firmware cs40l26.bin=stock/firmware/cs40l26.bin \
+            --firmware cs40l26-svc.bin=stock/firmware/cs40l26-svc.bin \
+            --firmware cs40l26-dvl.bin=stock/firmware/cs40l26-dvl.bin \
+            --firmware cs40l26-dbc.bin=stock/firmware/cs40l26-dbc.bin \
+            --firmware cs40l26-a2h.bin=stock/firmware/cs40l26-a2h.bin \
             --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 

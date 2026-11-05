@@ -66,10 +66,10 @@ enum Cmd {
         #[arg(long)]
         mono_license: PathBuf,
         /// A firmware file to put where the kernel's own loader finds it
-        /// before its first driver probe: name=local-file. The phone's init
-        /// turns on the fallback to ueventd in early-init, before it loads
-        /// any module, and ueventd reads /etc/firmware, which is a symbolic
-        /// link to system/etc/firmware in the stock ramdisk.
+        /// before its first driver probe: name=local-file. The loader reads
+        /// /lib/firmware before it asks anyone else, and the motor's driver
+        /// probes in early-init, before a recovery starts, so that is where
+        /// the file has to be.
         #[arg(long = "firmware")]
         firmware: Vec<String>,
         /// A module to put in the recovery's module directory, as
@@ -150,7 +150,7 @@ fn main() -> Result<()> {
             for file in firmware {
                 let (name, from) = file.split_once('=').with_context(|| "--firmware takes name=local-file")?;
                 ensure!(!name.is_empty() && !name.starts_with('/') && !name.contains(".."), "{name} is not a firmware name");
-                rd.add(&format!("system/etc/firmware/{name}"), 0o644, read(&PathBuf::from(from))?)?;
+                rd.add(&format!("lib/firmware/{name}"), 0o644, read(&PathBuf::from(from))?)?;
             }
             for file in modules {
                 let (name, from) = file.split_once('=').with_context(|| "--module takes name.ko=local-file")?;

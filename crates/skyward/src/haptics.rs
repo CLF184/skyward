@@ -1,7 +1,6 @@
 use anyhow::{anyhow, ensure, Context, Result};
 use evdev::raw_stream::RawDevice;
 use skyward_config::Strength;
-use std::f32::consts::TAU;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
@@ -13,27 +12,21 @@ use std::time::Duration;
 const EV_FF: u16 = 0x15;
 const FF_PERIODIC: u16 = 0x51;
 const FF_CUSTOM: u16 = 0x5d;
-
-/// The rate a made click's samples are played at, the lowest the driver
-/// takes: some fifty samples to each swing of the motor.
-const RATE: u32 = 8000;
+const FF_SINE: u16 = 0x5a;
 
 /// What a motor swings at when its driver says the frequency nowhere: the
 /// one the 17 Ultra's motor has, and the usual one of the linear motors
 /// these phones carry.
 const NOMINAL_HZ: f32 = 172.4;
 
-/// A made click: swings of the motor at its resonant frequency that drive
-/// it, then swings turned over that stop it, so that it does not ring on.
-const DRIVE_SWINGS: f32 = 2.0;
-const BRAKE_SWINGS: f32 = 1.5;
+/// How long a click runs. The driver plays a sine for the effect's replay
+/// length, and a waveform it keeps for as long as that one is; either way
+/// the click is taken away once this has passed.
+const NOMINAL_CLICK: Duration = Duration::from_millis(30);
 
-/// The vibration motor, played through the kernel's force-feedback
-/// events. The driver fills its queue with a made click's samples as the
-/// click is loaded, refilling it for no second play, and keeps the click
-/// playing after its samples have run out, even when told to stop, until
-/// the click is taken away. So each click is loaded as it is played, at the
-/// strength the slider gives, and taken away once it has played out.
+/// The vibration motor, played through the kernel's force-feedback events.
+/// Each click is loaded as it is played, at the strength the slider gives,
+/// and taken away once it has run.
 pub struct Haptics {
     dev: File,
     click: Click,
@@ -46,11 +39,12 @@ pub struct Haptics {
 
 /// What a click is.
 enum Click {
-    /// A waveform the driver keeps, by its number. The driver says how long
-    /// it plays as it loads it.
+    /// A waveform the driver keeps, by its number: a bank and a number are
+    /// handed over, and the driver plays that waveform.
     Kept(i16),
-    /// Samples made at the motor's resonant frequency, played at [`RATE`].
-    Made(Vec<i8>),
+    /// Swings of the motor at `hz`, which the driver makes up as a sine and
+    /// drives at the strength it is given.
+    Made(f32),
 }
 
 impl Haptics {
@@ -77,7 +71,7 @@ impl Haptics {
                     }
                 };
                 eprintln!("haptics {}: clicks made for a motor swinging at {hz} Hz", path.display());
-                Click::Made(made(hz))
+                Click::Made(hz)
             }
             (None, None) => unreachable!("the configuration names a click of one kind"),
         };
@@ -253,17 +247,10 @@ fn resonance(file: &str) -> Result<f32> {
     swept.with_context(|| format!("{file} says {counted}, which is no frequency these motors swing at"))
 }
 
-/// A click's samples at [`RATE`] for a motor that swings at `hz`: whole
-/// swings that drive it, then swings turned over that stop it.
-fn made(hz: f32) -> Vec<i8> {
-    let at = |swings: f32| (swings * RATE as f32 / hz).round() as usize;
-    let (drive, all) = (at(DRIVE_SWINGS), at(DRIVE_SWINGS + BRAKE_SWINGS));
-    (0..all)
-        .map(|i| {
-            let wave = (TAU * hz * i as f32 / RATE as f32).sin() * f32::from(i8::MAX);
-            (if i < drive { wave } else { -wave }).round() as i8
-        })
-        .collect()
+/// The period, in whole microseconds, of a swing at `hz`: what a periodic
+/// effect gives the driver to make the swing from, and never zero.
+fn period_of(hz: f32) -> u16 {
+    (1_000_000.0 / hz.max(1.0)).round().clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
 /// A click as the driver loaded it: the slot the kernel keeps it in, and
@@ -273,42 +260,29 @@ struct Loaded {
     length: Duration,
 }
 
-/// Samples handed to the driver to play as they are, as its
-/// `custom_fifo_data` lays them out.
-#[repr(C)]
-struct Samples {
-    /// Unused by the driver.
-    index: u32,
-    length: u32,
-    rate: u32,
-    data: *const i8,
-}
-
-/// Load `click` at `share` of its full strength as a custom periodic
-/// effect in a slot of its own. The driver drives the motor at the click's
-/// highest voltage times the magnitude.
+/// Load `click` at `share` of its full strength as a periodic effect in a
+/// slot of its own.
+///
+/// The driver tells what it is given by the effect's waveform: a waveform it
+/// keeps comes as two values, a bank and a number, and a sine comes from the
+/// period and the strength. Samples handed over as FIFO data are read as a
+/// wavetable the driver makes up itself, which this motor's firmware refuses
+/// ("Invalid OWT index: -1" in the kernel log), so none are handed over.
 fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
-    // The driver tells the two kinds apart by the length in bytes of what
-    // the effect points to, and loads nothing for any other length, though
-    // the upload still succeeds. For a waveform it keeps it reads the
-    // waveform's number from the first of three values and writes how long
-    // it plays into the other two, in whole seconds and then milliseconds.
-    let mut kept: [i16; 3] = [0; 3];
-    let mut samples = Samples { index: 0, length: 0, rate: RATE, data: std::ptr::null() };
-    let (len, data) = match click {
+    let mut kept: [i16; 2] = [0; 2];
+    let (waveform, period, len, data) = match click {
         Click::Kept(id) => {
-            kept[0] = *id;
-            (std::mem::size_of_val(&kept), kept.as_mut_ptr())
+            // The RAM waveforms are the bank before the number: 0 is the one
+            // the phone's own HAL plays when it starts.
+            kept[0] = 0;
+            kept[1] = *id;
+            (FF_CUSTOM, 0u16, std::mem::size_of_val(&kept), kept.as_mut_ptr())
         }
-        Click::Made(made) => {
-            samples.length = u32::try_from(made.len())?;
-            samples.data = made.as_ptr();
-            (std::mem::size_of::<Samples>(), (&mut samples as *mut Samples).cast::<i16>())
-        }
+        Click::Made(hz) => (FF_SINE, period_of(*hz), 0, std::ptr::null_mut()),
     };
     let periodic = libc::ff_periodic_effect {
-        waveform: FF_CUSTOM,
-        period: 0,
+        waveform,
+        period,
         magnitude: (share.clamp(0.0, 1.0) * f32::from(i16::MAX)).round() as i16,
         offset: 0,
         phase: 0,
@@ -321,7 +295,7 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
         id: -1,
         direction: 0,
         trigger: libc::ff_trigger { button: 0, interval: 0 },
-        replay: libc::ff_replay { length: 0, delay: 0 },
+        replay: libc::ff_replay { length: NOMINAL_CLICK.as_millis() as u16, delay: 0 },
         u: [0; 4],
     };
     // The union holds the periodic effect; it is exactly as large.
@@ -333,17 +307,7 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
     if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, &mut effect) } < 0 {
         return Err(io::Error::last_os_error().into());
     }
-    let length = match click {
-        Click::Kept(id) => {
-            let [_, seconds, millis] = kept;
-            let length = Duration::from_secs(u64::try_from(seconds)?) + Duration::from_millis(u64::try_from(millis)?);
-            ensure!(!length.is_zero(), "the driver loaded waveform {id} without saying how long it plays");
-            length
-        }
-        // The queue is full before the samples start playing.
-        Click::Made(made) => Duration::from_secs_f64(made.len() as f64 / f64::from(RATE)),
-    };
-    Ok(Loaded { slot: effect.id, length })
+    Ok(Loaded { slot: effect.id, length: NOMINAL_CLICK })
 }
 
 /// Start the loaded effect in slot `id`.
@@ -368,15 +332,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_made_click_drives_whole_swings_then_turns_over() {
-        let samples = made(172.4);
-        let drive = (DRIVE_SWINGS * RATE as f32 / 172.4).round() as usize;
-        assert_eq!(samples.len(), (3.5 * RATE as f32 / 172.4).round() as usize);
-        assert_eq!(samples[0], 0);
-        assert_eq!(*samples.iter().max().unwrap(), i8::MAX);
-        let quarter = (RATE as f32 / 172.4 / 4.0).round() as usize;
-        assert!(samples[quarter] > 120, "it rises first");
-        assert!(samples[drive + quarter] < -120, "it falls first once turned over");
+    fn a_sine_is_asked_for_at_the_motors_own_period() {
+        assert_eq!(period_of(200.0), 5_000);
+        assert_eq!(period_of(1_000.0), 1_000);
+        assert_eq!(period_of(1_000_000.0), 1, "never zero microseconds");
+        assert_eq!(period_of(0.0), 1, "a frequency of nothing is still a period");
     }
 
     #[test]
