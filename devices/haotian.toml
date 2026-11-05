@@ -198,30 +198,28 @@ server = "https://update.miui.com/updates/miotaV3.php"
 version = "OS4.0.0.19.XOBCNXM"
 package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.0.19.XOBCNXM/haotian-ota_full-OS4.0.0.19.XOBCNXM-user-17.0-2f40c16d06.zip"
 recovery = "657f3bed0afa0be2a9dbc07ed3d511c6acda4f82c2c5c99983b9c86d7d9358b7"
-# This phone's motor is not the one qcom-hv-haptics drives: it is Cirrus
-# Logic's CS40L26 on i2c 0-0043, whose driver the phone's own init loads as
-# cs40l26-core, cs40l26-i2c and snd-soc-cs40l26. Its probe reads
-# cs40l26.wmfw through the kernel's loader, and ends with error -2 when the
-# file is not there, so no force-feedback device appears until it is.
+# This phone's motor is Cirrus Logic's CS40L26 on i2c 0-0043, driven by
+# cs40l26-core and cs40l26-i2c. Its probe reads the firmware through the
+# kernel's loader, and ends with error -2 when the file is not there, so no
+# force-feedback device appears until it is.
 #
 # The firmware sits at the top of /odm/firmware, which is the fourth of the
 # phone's own firmware folders: the kernel's firmware_class.path names
-# /odm/firmware/o8, but no such folder is in this build, so the driver is
-# given the files by name through the recovery's own loader folders. Its
-# probe reads the wavetable in cs40l26.bin beside the wmfw, and the phone's
-# own boot has it load the service, driver-level and audio-to-haptic files
-# after them: without the set the DSP comes up with no waveforms to play.
+# /odm/firmware/o8, but no such folder is in this build, so the files are
+# given by name through the recovery's own loader folders. The probe reads
+# the wavetable in cs40l26.bin beside the wmfw, and the phone's own boot has
+# it load the service, driver-level and audio-to-haptic files after them:
+# without the set the DSP comes up with no waveforms to play.
 #
-# It keeps those waveforms -- 43 of them, the first the click the phone's own
-# HAL plays when it starts -- and plays the one it is named by number, with
-# how long that one runs written back beside the number. Naming one is what
-# keeps the click on the path this driver has: handed samples instead, it
-# composes a wavetable of its own and refuses them ("Invalid OWT index: -1"
-# in the kernel log), so no click loads, and the recovery that asked for one
-# ends. Waveform 0 is the click.
+# The click is a sine the driver makes up from the period and the strength,
+# at the frequency the calibration file says the motor swings at. Handing
+# the driver samples instead, or naming a waveform it keeps, has it compose
+# a wavetable of its own, which this motor's firmware refuses ("Invalid OWT
+# index: -1" in the kernel log): no click loads, and the recovery that asked
+# for one ends.
 [haptics]
 modules = ["cs40l26-core", "cs40l26-i2c"]
-click = 0
+resonance = "/sys/bus/i2c/devices/0-0043/input/input6/calibration/f0_stored"
 firmware = [
     { name = "cs40l26.wmfw", path = "/odm/firmware/cs40l26.wmfw" },
     { name = "cs40l26.bin", path = "/odm/firmware/cs40l26.bin" },
