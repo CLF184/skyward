@@ -51,8 +51,8 @@ pub struct Haptics {
 
 /// What a click is.
 enum Click {
-    /// A waveform the driver keeps, by its number. The driver says how long
-    /// it plays as it loads it.
+    /// A waveform the driver keeps, by its number. Its length is the one the
+    /// recovery takes, this driver saying nothing of its own.
     Kept(i16),
     /// Samples made at the motor's resonant frequency, played at [`RATE`].
     Made(Vec<i8>),
@@ -293,16 +293,19 @@ struct Samples {
 /// effect in a slot of its own. The driver drives the motor at the click's
 /// highest voltage times the magnitude.
 fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
-    // The driver tells the two kinds apart by the length in bytes of what
-    // the effect points to, and loads nothing for any other length, though
-    // the upload still succeeds. For a waveform it keeps it reads the
-    // waveform's number from the first of three values and writes how long
-    // it plays into the other two, in whole seconds and then milliseconds.
-    let mut kept: [i16; 3] = [0; 3];
+    // The driver tells the two kinds apart by what the effect points at: a
+    // waveform it keeps is named by a bank and a number, in two values;
+    // samples are handed over as the FIFO data below.
+    let mut kept: [i16; 2] = [0; 2];
     let mut samples = Samples { index: 0, length: 0, rate: RATE, data: std::ptr::null() };
     let (len, data) = match click {
         Click::Kept(id) => {
-            kept[0] = *id;
+            // The driver names a waveform it keeps as a bank and a number:
+            // the RAM bank, then the waveform's own number. A longer payload
+            // it reads as a composition of its own, which this motor's
+            // firmware refuses ("Invalid OWT index: -1").
+            kept[0] = 0;
+            kept[1] = *id;
             (std::mem::size_of_val(&kept), kept.as_mut_ptr())
         }
         Click::Made(made) => {
@@ -339,20 +342,9 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
         return Err(io::Error::last_os_error().into());
     }
     let length = match click {
-        Click::Kept(id) => {
-            let [_, seconds, millis] = kept;
-            let length = Duration::from_secs(u64::try_from(seconds)?) + Duration::from_millis(u64::try_from(millis)?);
-            // A driver that plays the waveform but says nothing of its length
-            // would otherwise be read as one that loaded nothing, and a click
-            // that never loads is what ends the recovery that asked for it.
-            if length.is_zero() {
-                eprintln!("haptics: the driver loaded waveform {id} without saying how long it plays; {NOMINAL_CLICK:?} is taken");
-                NOMINAL_CLICK
-            } else {
-                length
-            }
-        }
-        // The queue is full before the samples start playing.
+        // The driver plays the waveform it was named and says nothing of its
+        // length; a click that outlives it is erased by the next anyway.
+        Click::Kept(_) => NOMINAL_CLICK,
         Click::Made(made) => Duration::from_secs_f64(made.len() as f64 / f64::from(RATE)),
     };
     Ok(Loaded { slot: effect.id, length })
