@@ -230,7 +230,6 @@ firmware = [
     { name = "cs40l26-dbc.bin", path = "/odm/firmware/cs40l26-dbc.bin" },
     { name = "cs40l26-a2h.bin", path = "/odm/firmware/cs40l26-a2h.bin" },
 ]
-resonance = "/sys/bus/i2c/devices/0-0043/input/input6/calibration/f0_stored"
 strength = { lightest = 0.25, strongest = 0.75 }
 
 # The recovery's own logd loads libsysutils and libcap, which the stock
