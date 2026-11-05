@@ -674,9 +674,13 @@ pub mod kms {
                 // one, it is decompressed with the wrong arithmetic, and the
                 // panel shows the picture with its channels mangled rather
                 // than its geometry wrong.
-                let bpp = layout.bpp.unwrap_or(2);
+                // The connector's rate is the link's bits a pixel, not the
+                // compressor's: `dsi_24bpp` is the eight bits a channel this
+                // buffer holds. Told 30, the link packs ten bits a channel out
+                // of eight, and the panel shows the picture with its colours
+                // mangled though its geometry is right.
                 if let Ok((id, _)) = conn_props.get("bpp_mode") {
-                    if let Ok(choice) = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp) {
+                    if let Ok(choice) = enum_choice(&card, id, &["dsi_24bpp"], 1) {
                         req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
                     }
                 }
