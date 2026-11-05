@@ -59,7 +59,7 @@ pub(crate) fn order_of(fourcc: u32) -> Order {
 /// `XB24` first: it is the order the canvas already holds its bytes in, and
 /// what a haotian's own recovery drives its panel with.
 #[cfg(any(target_os = "android", test))]
-pub(crate) const SCANOUT: [u32; 4] = [0x3432_4258, 0x3432_4241, 0x3432_5258, 0x3432_5241];
+pub(crate) const SCANOUT: [u32; 4] = [0x3432_5258, 0x3432_4258, 0x3432_4241, 0x3432_5241];
 
 /// How Qualcomm's display driver drives a mode, from the text of the
 /// connector's mode_properties blob: key=value lines, a block per mode_name.
