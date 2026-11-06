@@ -139,6 +139,20 @@ registers = [
 user = "system"
 groups = ["nfc", "system"]
 
+# 5b. OMAPI
+# The Thales weaver reaches the secure element through
+# android.se.omapi.ISecureElementService/default, which system_server serves
+# on Android. se_omapi, packed into the ramdisk with its description, serves
+# it here. It loads its two interface libraries from the vendor partition and
+# the rest from the recovery's own, and asks for eSE1, so it starts after the
+# secure element and before the weaver. Run as root, as YARP runs it.
+[[service]]
+path = "/system/bin/se_omapi"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.se.omapi.ISecureElementService/default"
+user = "root"
+groups = ["root", "system"]
+
 # 6. Weaver 服务
 # Thales' weaver, run as vendor_thales_weaver in that group, system and
 # drmrpc, as its init script on the odm partition has it.

@@ -77,15 +77,15 @@ enum Cmd {
         /// the installed system's vendor_dlkm.
         #[arg(long = "module")]
         modules: Vec<String>,
-        /// A folder holding se_omapi and the libraries it loads, laid out as
-        /// the ramdisk holds them: system/bin/se_omapi, system/lib64/….
+        /// A folder holding se_omapi as system/bin/se_omapi and its service
+        /// description as se_omapi.xml.
         ///
         /// A phone whose weaver HAL reaches the secure element through
         /// Android's own OMAPI service gets nothing back from it in a
         /// recovery, which runs no such service: every call to the weaver
         /// then fails, and a user's secret behind a weaver slot cannot be
         /// read. se_omapi is that service on its own; this puts it in the
-        /// ramdisk, with the init rule that starts it.
+        /// ramdisk, for the configuration to start.
         #[arg(long)]
         omapi: Option<PathBuf>,
         #[arg(long)]
@@ -164,9 +164,8 @@ fn main() -> Result<()> {
             }
             rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
             // The OMAPI service the weaver reaches a secure element through,
-            // with the init rule that starts it beside the services it asks
-            // for. Its own libraries go in beside it, since a recovery's
-            // library path is the ramdisk's and nothing else.
+            // and the description the service directory wants of it. The
+            // recovery starts it with the phone's other services.
             if let Some(stage) = &omapi {
                 install_omapi(&mut rd, stage, &read)?;
             }
@@ -272,51 +271,31 @@ const TASK_PROFILES: &[u8] = include_bytes!("task_profiles.json");
 /// stock recovery does not offer.
 const MTP_RC: &[u8] = include_bytes!("mtp.rc");
 
-/// The init rules that start the OMAPI service a weaver reaches a secure
-/// element through, and the libraries it loads.
+/// The OMAPI service a weaver reaches a secure element through, and the
+/// description that lets it register.
 ///
 /// The service registers `android.se.omapi.ISecureElementService/default`,
 /// which is the name the Thales weaver HAL looks up. Android's own lives in
 /// system_server; a recovery runs no framework, so it gets its own.
 ///
-/// It is started at `late-init`, before any service that would ask it
-/// anything: the weaver is started by the recovery once the secure element
-/// hardware is up, and asks OMAPI the moment it takes a call.
-///
-/// The library path is the ramdisk's own `system/lib64`, where the files
-/// beside this rule are put: a recovery's linker looks nowhere else for a
-/// program that names no path of its own.
-const OMAPI_RC: &[u8] = include_bytes!("omapi.rc");
-
-/// The files se_omapi is, under the folder holding them, and where in the
-/// ramdisk each goes.
-///
-/// The whole chain is named: libbinder_ndk loads libbinder, libutils loads
-/// libvndksupport, and both reach libbase and liblog. libc++, libc, libm and
-/// libdl are not named here because a stock recovery carries them already,
-/// its own programs being C++ too; one that somehow does not is caught when
-/// the service starts and says what it could not load.
-const OMAPI_FILES: [(&str, &str, u32); 10] = [
+/// No init rule starts it: the recovery starts it with the phone's other
+/// services, once the vendor partition is mounted, since it loads its two
+/// interface libraries from there and asks the secure element HAL for eSE1.
+/// The phone's configuration names it after the secure element and before
+/// the weaver. The service directory turns away a name no description
+/// declares, so the description goes where the directory reads them at boot.
+/// The rest of what it loads, libbinder_ndk and below, is the stock
+/// recovery's own: a newer build of the interface libraries asks libbinder_ndk
+/// for symbols the stock one lacks.
+const OMAPI_FILES: [(&str, &str, u32); 2] = [
     ("system/bin/se_omapi", "system/bin/se_omapi", 0o755),
-    ("system/lib64/libbinder_ndk.so", "system/lib64/libbinder_ndk.so", 0o644),
-    ("system/lib64/libbinder.so", "system/lib64/libbinder.so", 0o644),
-    ("system/lib64/libbase.so", "system/lib64/libbase.so", 0o644),
-    ("system/lib64/libutils.so", "system/lib64/libutils.so", 0o644),
-    ("system/lib64/libvndksupport.so", "system/lib64/libvndksupport.so", 0o644),
-    ("system/lib64/android.se.omapi-V1-ndk.so", "system/lib64/android.se.omapi-V1-ndk.so", 0o644),
-    (
-        "system/lib64/android.hardware.secure_element-V1-ndk.so",
-        "system/lib64/android.hardware.secure_element-V1-ndk.so",
-        0o644,
-    ),
-    ("system/lib64/libcutils.so", "system/lib64/libcutils.so", 0o644),
-    ("system/lib64/liblog.so", "system/lib64/liblog.so", 0o644),
+    ("se_omapi.xml", "system/etc/vintf/manifest/se_omapi.xml", 0o644),
 ];
 
-/// Put the OMAPI service, the libraries it loads and the rule that starts it
-/// into `rd`, from the folder `stage` holds them in.
+/// Put the OMAPI service and its description into `rd`, from the folder
+/// `stage` holds them in.
 ///
-/// A stock recovery that already runs the service keeps its own: the two
+/// A stock recovery that already carries the service keeps its own: the two
 /// would answer to the same name, and the second to register would replace
 /// the first.
 fn install_omapi(rd: &mut Ramdisk, stage: &Path, read: &impl Fn(&PathBuf) -> Result<Vec<u8>>) -> Result<()> {
@@ -325,15 +304,9 @@ fn install_omapi(rd: &mut Ramdisk, stage: &Path, read: &impl Fn(&PathBuf) -> Res
     }
     let at = |name: &str| stage.join(name.replace('/', std::path::MAIN_SEPARATOR_STR));
     for (from, to, mode) in OMAPI_FILES {
-        // Something already there is the stock recovery's own build, which
-        // this one is not to replace.
-        if rd.find(to).is_some() {
-            continue;
-        }
         let bytes = read(&at(from)).with_context(|| format!("--omapi: {} is not in {}", from, stage.display()))?;
         rd.add(to, mode, bytes)?;
     }
-    rd.add(paths::OMAPI_RC, 0o644, OMAPI_RC.to_vec())?;
     Ok(())
 }
 
