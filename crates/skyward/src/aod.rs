@@ -1,5 +1,10 @@
 //! Carries out the panel's own doze that `skyward_ui::aod` decides on.
 //!
+//! Nothing here touches the phone until a panel first goes dark: the driver's
+//! folder and the node a command set is sent through are opened then, not on
+//! the way up. A recovery that reads a proc node before its first frame is a
+//! recovery whose frame may never come.
+//!
 //! Every write here is best-effort. A panel whose driver refuses one is put
 //! out the ordinary way for the rest of the run, and why goes to the kernel
 //! log once.
@@ -14,7 +19,8 @@ pub struct Panel {
     doze: Doze,
     dir: PathBuf,
     node: PathBuf,
-    driver: Option<Driver>,
+    /// What the driver said of itself, read once the first panel went dark.
+    driver: Option<Option<Driver>>,
     shown: Shown,
     /// Set once the driver has refused, so the recovery stops asking.
     given_up: bool,
@@ -30,8 +36,7 @@ impl Panel {
             leave_cmds: aod.leave_cmds.clone(),
         };
         let (dir, node) = (PathBuf::from(&aod.dir), PathBuf::from(&aod.node));
-        let driver = read_driver(&dir, &node);
-        Panel { doze, dir, node, driver, shown: Shown::Lit, given_up: false }
+        Panel { doze, dir, node, driver: None, shown: Shown::Lit, given_up: false }
     }
 
     /// Whether a dark panel is to show the face rather than be blacked out.
@@ -42,7 +47,11 @@ impl Panel {
     /// Tell the panel what the pages want of it, and give what it is doing
     /// once told.
     pub fn want(&mut self, want: Want) -> Shown {
-        let decision = self.doze.plan(self.shown, want, self.driver.as_ref());
+        if self.driver.is_none() {
+            self.driver = Some(read_driver(&self.dir, &self.node));
+        }
+        let driver = self.driver.as_ref().and_then(Option::as_ref);
+        let decision = self.doze.plan(self.shown, want, driver);
         if let Some(refusal) = decision.refusal {
             self.give_up(refusal.why());
         }
@@ -76,7 +85,7 @@ impl Panel {
             let _ = skyward_sys::kmsg(why);
         }
         self.given_up = true;
-        self.driver = None;
+        self.driver = Some(None);
     }
 }
 
