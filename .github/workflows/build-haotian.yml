@@ -11,6 +11,7 @@ on:
       - "crates/**"
       - "devices/haotian.toml"
       - "resources/fonts/**"
+      - "resources/omapi/**"
       - ".github/workflows/build-haotian.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -142,6 +143,7 @@ jobs:
             --firmware cs40l26-dvl.bin=stock/firmware/cs40l26-dvl.bin \
             --firmware cs40l26-dbc.bin=stock/firmware/cs40l26-dbc.bin \
             --firmware cs40l26-a2h.bin=stock/firmware/cs40l26-a2h.bin \
+            --omapi resources/omapi \
             --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
