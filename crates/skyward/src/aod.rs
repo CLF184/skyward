@@ -5,14 +5,27 @@
 //! the way up. A recovery that reads a proc node before its first frame is a
 //! recovery whose frame may never come.
 //!
-//! Every write here is best-effort. A panel whose driver refuses one is put
-//! out the ordinary way for the rest of the run, and why goes to the kernel
-//! log once.
+//! Every write here is best-effort, and one the driver refuses is not the end
+//! of the panel's doze: the display driver answers EAGAIN while it is still
+//! sending the frame the recovery just handed it. A set is offered again, and
+//! only a panel that refuses several times in a row is put out the ordinary
+//! way for the rest of the run, with why said once in the kernel log.
 
 use skyward_config::Aod;
 use skyward_ui::aod::{Doze, Driver, Feature, Plan, Shown, Want};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// How many times one command set is offered to a driver that says it is
+/// busy, and how long between the offers: the driver is sending a frame, so
+/// this is the length of a frame or two.
+const SEND_ATTEMPTS: u32 = 6;
+const SEND_RETRY: Duration = Duration::from_millis(12);
+
+/// How many times in a row the panel may refuse a command set before the
+/// recovery stops asking for the rest of the run.
+const REFUSALS_BEFORE_GIVING_UP: u32 = 3;
 
 /// The panel's doze as this run of the recovery has it.
 pub struct Panel {
@@ -22,8 +35,11 @@ pub struct Panel {
     /// What the driver said of itself, read once the first panel went dark.
     driver: Option<Option<Driver>>,
     shown: Shown,
-    /// Set once the driver has refused, so the recovery stops asking.
+    /// Set once the driver has refused too many times, so the recovery stops
+    /// asking.
     given_up: bool,
+    /// The command sets refused in a row.
+    refusals: u32,
 }
 
 impl Panel {
@@ -36,7 +52,7 @@ impl Panel {
             leave_cmds: aod.leave_cmds.clone(),
         };
         let (dir, node) = (PathBuf::from(&aod.dir), PathBuf::from(&aod.node));
-        Panel { doze, dir, node, driver: None, shown: Shown::Lit, given_up: false }
+        Panel { doze, dir, node, driver: None, shown: Shown::Lit, given_up: false, refusals: 0 }
     }
 
     /// Whether a dark panel is to show the face rather than be blacked out.
@@ -67,17 +83,44 @@ impl Panel {
             }
         }
         for cmd in cmds {
-            if let Err(e) = fs::write(&self.node, cmd.to_string()) {
-                self.give_up(&format!("the panel did not take command set {cmd}, so it is put out the ordinary way: {e}"));
-                // A panel that did not go into its doze is blacked out by
-                // the caller; one that did not come out is lit regardless.
+            if let Err(e) = self.send(cmd) {
+                // A panel that did not go into its doze is blacked out by the
+                // caller; one that did not come out is lit regardless.
                 if self.shown == Shown::Dozing {
                     self.shown = Shown::Blank;
                 }
+                // One refused set is not the end of the panel's doze: the
+                // display driver answers EAGAIN while it is still sending the
+                // frame the recovery just handed it, and a set sent then is
+                // simply not taken. Only a panel that has refused several
+                // times in a row is given up on, and then for the whole run.
+                self.refusals += 1;
+                if self.refusals >= REFUSALS_BEFORE_GIVING_UP {
+                    self.give_up(&format!(
+                        "the panel did not take command set {cmd} {REFUSALS_BEFORE_GIVING_UP} times in a row, so it is put out the ordinary way: {e}"
+                    ));
+                }
                 break;
             }
+            self.refusals = 0;
         }
         self.shown
+    }
+
+    /// Send one command set to the panel, waiting out a driver that is still
+    /// busy with the frame it was just handed rather than giving up on it.
+    fn send(&self, cmd: u32) -> std::io::Result<()> {
+        let mut left = SEND_ATTEMPTS;
+        loop {
+            match fs::write(&self.node, cmd.to_string()) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && left > 1 => {
+                    left -= 1;
+                    std::thread::sleep(SEND_RETRY);
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     fn give_up(&mut self, why: &str) {
