@@ -499,6 +499,9 @@ pub enum Switch {
     /// over.
     KeepRecovery,
     Wlan,
+    /// Show the clock and the phone's readings on a dark panel, in the
+    /// panel's own doze, rather than putting the panel out.
+    AlwaysOn,
     /// Show the password typed rather than a dot for each character.
     ShowPassword,
 }
@@ -1482,6 +1485,14 @@ pub struct State {
     pub vibration: f32,
     /// A computer connected over USB is offered internal storage.
     pub file_transfer: bool,
+    /// A dark panel keeps the clock and the phone's readings on the glass in
+    /// the panel's own doze, rather than being put out. A phone whose panel
+    /// has no doze of its own shows nothing either way, and the switch is
+    /// not offered on it.
+    pub always_on: bool,
+    /// This phone's panel has a doze of its own, which the settings page then
+    /// offers a switch for.
+    pub panel_dozes: bool,
     pub reboot: usize,
     /// What the wipe page has chosen, by place in [`WIPES`].
     pub wipe: [bool; WIPES.len()],
@@ -1639,6 +1650,8 @@ impl Default for State {
             vibrate: true,
             vibration: SLIDER_START,
             file_transfer: true,
+            always_on: true,
+            panel_dozes: false,
             reboot: 0,
             wipe: [false; WIPES.len()],
             cache_partition: false,
@@ -4746,6 +4759,7 @@ impl App {
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
+                    Switch::AlwaysOn => &mut self.state.always_on,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
                 *on = !*on;
@@ -7552,6 +7566,23 @@ mod tests {
         app.touch(Touch::Up, &f, 1600);
         app.tick(4000);
         assert_eq!(app.overscroll(4000), 0.0);
+    }
+
+    #[test]
+    fn the_always_on_switch_shows_only_on_a_panel_that_dozes_and_turns_it() {
+        let (f, i) = (fonts(), info());
+        let offered = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::AlwaysOn));
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        assert!(!offered(&mut app), "a panel with no doze of its own has nothing to keep on the glass");
+        // A phone whose panel does doze offers the switch, and it starts on.
+        app.state.panel_dozes = true;
+        app.redraw();
+        assert!(offered(&mut app), "the switch is on the settings page");
+        assert!(app.state.always_on, "the face shows unless it is turned off");
+        tap(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn));
+        assert!(!app.state.always_on, "the switch turns it off");
+        tap(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn));
+        assert!(app.state.always_on, "and on again");
     }
 
     #[test]

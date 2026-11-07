@@ -1181,6 +1181,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // keeps the time on the glass with the backlight at 0.
     let mut doze = cfg.aod.as_ref().map(aod::Panel::new);
     let mut faced = String::new();
+    // Whether the settings page offers a switch for the panel's own doze: a
+    // phone whose panel has one.
+    app.state.panel_dozes = cfg.aod.is_some();
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
@@ -1450,11 +1453,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 shown = true;
             }
             blanked = false;
-        } else if dozes {
+        } else if dozes && app.state.always_on {
             // The face goes on the glass before the panel dozes, and again
             // each minute: an OLED in its doze shows what the frame holds.
+            if !blanked {
+                faced.clear();
+            }
             if !blanked || faced != shown_clock {
-                skyward_ui::aod::face(&mut screen, &fonts, &shown_clock, cfg.display.density as f32 / 160.0);
+                let facts = skyward_ui::aod::Facts {
+                    date: skyward_ui::fmt::date(app.state.lang, unix_now()?, app.state.time_zone),
+                    battery: info.battery.as_ref().map(|b| (b.level, b.plugged())),
+                    slot: info.slot.map(|s| s.letter().to_string()),
+                    data: skyward_ui::fmt::data(app.state.lang, &app.state.data).to_string(),
+                };
+                skyward_ui::aod::face(&mut screen, &fonts, &shown_clock, &facts, cfg.display.density as f32 / 160.0);
                 surface.present(&screen)?;
                 surface.settle()?;
                 faced.clone_from(&shown_clock);

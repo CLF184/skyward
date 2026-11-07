@@ -163,6 +163,7 @@ const ABOUT: Text = ["关于本机", "關於手機", "About phone"];
 const SPECS: Text = ["全部参数与信息", "全部規格與資訊", "All specs"];
 const LOGS: Text = ["导出日志", "匯出記錄", "Export logs"];
 const SCREEN_TIMEOUT: Text = ["息屏时间", "螢幕自動關閉", "Screen timeout"];
+const ALWAYS_ON: Text = ["息屏显示", "螢幕關閉顯示", "Always-on display"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
@@ -342,7 +343,21 @@ pub fn settings(cx: &Ctx) -> Frame {
     if let Some(r) = slider.below {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
-    y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["振动", "震動", "Vibration"]));
+    // A phone whose panel has a doze of its own keeps a little on the glass
+    // with the screen off; one whose panel has none shows nothing to offer.
+    if s.panel_dozes {
+        y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["息屏显示", "螢幕關閉顯示", "Always-on display"]));
+        let on = Row::new(l.pick(ALWAYS_ON)).trail(Trail::Switch(s.always_on));
+        let aod = widgets::list(&mut c, t, f, y, &[on]);
+        out.extend(hits(&aod.rows, &[Action::Toggle(Switch::AlwaysOn)]));
+        let note = l.pick([
+            "屏幕熄灭后仍显示时间、电量、槽位与解密状态，背光保持关闭。",
+            "螢幕關閉後仍顯示時間、電量、槽位與解密狀態，背光保持關閉。",
+            "With the screen off, the time, the battery, the slot and the data partition stay on the glass, with the backlight out.",
+        ]);
+        y = widgets::footnote(&mut c, t, f, aod.bottom, note);
+    }
+    y = widgets::section(&mut c, t, f, y, l.pick(["振动", "震動", "Vibration"]));
     let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
     let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
     out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });

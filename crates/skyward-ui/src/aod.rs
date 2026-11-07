@@ -42,6 +42,51 @@ const MARK_DROP_DP: f32 = 56.0;
 const MARK_WIDE_DP: f32 = 72.0;
 const MARK_THICK_DP: f32 = 2.0;
 
+/// The line of readings under the mark: the battery, the slot the recovery
+/// runs from, and whether the data partition is open. Its size in dp, and how
+/// far below the clock's middle it sits.
+const FACTS_DP: f32 = 15.0;
+const FACTS_DROP_DP: f32 = 84.0;
+/// The date above the clock, its size in dp and how far above the clock's
+/// middle its baseline sits.
+const DATE_DP: f32 = 17.0;
+const DATE_RISE_DP: f32 = 78.0;
+
+/// What the face says beside the time: the readings a person glancing at the
+/// phone wants, and nothing that has to be read closely.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// The date, as the phone's locale writes it, such as `2026年11月7日`.
+    pub date: String,
+    /// The battery's level, as a share of a full charge, and whether it is
+    /// charging.
+    pub battery: Option<(u8, bool)>,
+    /// The slot the recovery runs from, as its letter: `A` or `B`.
+    pub slot: Option<String>,
+    /// Whether the data partition is open, as the decrypt page names it.
+    pub data: String,
+}
+
+impl Facts {
+    /// The readings as one line, in the order they are drawn: the battery,
+    /// the slot, and the data partition. A reading the phone does not give is
+    /// left out, and a face with nothing to say draws no line at all.
+    pub fn line(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some((level, charging)) = self.battery {
+            parts.push(if charging { format!("{level}% +") } else { format!("{level}%") });
+        }
+        if let Some(slot) = &self.slot {
+            parts.push(slot.clone());
+        }
+        if !self.data.is_empty() {
+            parts.push(self.data.clone());
+        }
+        parts.join("   ")
+    }
+}
+
+
 /// One of the display driver's features and the value it is to be given, as
 /// the phone's configuration names it: the number `disp_param` prints in the
 /// brackets after the feature's name.
@@ -245,21 +290,28 @@ impl Doze {
     }
 }
 
-/// Draw the face the panel keeps on the glass while it dozes: the time, and a
-/// small mark under it, on black.
+/// Draw the face the panel keeps on the glass while it dozes: the date, the
+/// time, the readings a glance wants, and a small mark under them, on black.
 ///
-/// The frame is what glows, so everything but the clock and the mark is
-/// black: a page's worth of light would burn the panel and drain the battery
-/// with the backlight never coming on. The face stands a little to one side
-/// or the other of the middle, a different place each minute, so that the
-/// same subpixels are not lit for hours on end.
-pub fn face(out: &mut Canvas, f: &Fonts, clock: &str, px_per_dp: f32) {
+/// The frame is what glows, so everything but what is drawn here is black: a
+/// page's worth of light would burn the panel and drain the battery with the
+/// backlight never coming on. The face stands a little to one side or the
+/// other of the middle, a different place each minute, so that the same
+/// subpixels are not lit for hours on end.
+pub fn face(out: &mut Canvas, f: &Fonts, clock: &str, facts: &Facts, px_per_dp: f32) {
     out.clear(BLACK);
     let (w, h) = (out.w as f32, out.h as f32);
     let (cx, cy) = (w / 2.0 + drift(clock, px_per_dp), h * CLOCK_AT);
+    if !facts.date.is_empty() {
+        out.text_center(&f.body, &facts.date, cx, cy - DATE_RISE_DP * px_per_dp, DATE_DP * px_per_dp, MARK);
+    }
     out.text_center(&f.display, clock, cx, cy, CLOCK_DP * px_per_dp, INK);
     let (wide, thick) = (MARK_WIDE_DP * px_per_dp, (MARK_THICK_DP * px_per_dp).max(1.0));
     out.fill_rect(cx - wide / 2.0, cy + MARK_DROP_DP * px_per_dp, wide, thick, MARK);
+    let line = facts.line();
+    if !line.is_empty() {
+        out.text_center(&f.body, &line, cx, cy + FACTS_DROP_DP * px_per_dp, FACTS_DP * px_per_dp, MARK);
+    }
 }
 
 /// How far, in pixels, the face stands from the middle of the screen for the
@@ -388,28 +440,50 @@ mod tests {
         (Canvas::filled(1440, 3200, Rgba::rgb(9, 9, 9)), crate::font::bundled())
     }
 
+    /// The readings a face on `haotian` is given: a date, a battery at 48%
+    /// that is charging, slot A, and the data partition still closed.
+    fn facts() -> Facts {
+        Facts { date: "2026年11月7日".into(), battery: Some((48, true)), slot: Some("A".into()), data: "未解密".into() }
+    }
+
     #[test]
-    fn the_face_lights_a_clock_and_a_mark_on_black_and_nothing_else() {
+    fn the_face_lights_a_clock_and_its_readings_on_black_and_nothing_else() {
         let (mut out, f) = screen();
-        face(&mut out, &f, "03:27", 3.75);
+        face(&mut out, &f, "03:27", &facts(), 3.75);
         let lit = out.data.as_chunks::<4>().0.iter().filter(|p| p[0] > 0).count();
         assert!(lit > 0, "the clock is on the glass");
         // A page's worth of light would burn the panel: a few thousand
         // pixels out of four and a half million is all the face lights.
-        assert!(lit < 60_000, "{lit} pixels lit of {}", out.data.len() / 4);
-        // Everything that is not the clock or its mark is black; the clock's
-        // edges are anti-aliased, so a little more than its ink is not.
+        assert!(lit < 90_000, "{lit} pixels lit of {}", out.data.len() / 4);
+        // Everything that is not the face is black; its edges are
+        // anti-aliased, so a little more than its ink is not.
         let black = out.data.as_chunks::<4>().0.iter().filter(|p| p[..3] == [0, 0, 0]).count();
-        assert!(black > out.data.len() / 4 * 98 / 100, "{} of {} pixels are black", black, out.data.len() / 4);
+        assert!(black > out.data.len() / 4 * 97 / 100, "{} of {} pixels are black", black, out.data.len() / 4);
+    }
+
+    #[test]
+    fn the_face_shows_the_readings_the_phone_gives_and_leaves_out_the_rest() {
+        // A whole line: the battery, its charging, the slot and the data
+        // partition, each where a glance finds it.
+        assert_eq!(facts().line(), "48% +   A   未解密");
+        assert_eq!(Facts { battery: Some((48, false)), ..facts() }.line(), "48%   A   未解密");
+        // A phone that gives none of them draws no line at all, and the face
+        // is still the clock over its mark.
+        let bare = Facts::default();
+        assert_eq!(bare.line(), "");
+        let (mut out, f) = screen();
+        face(&mut out, &f, "03:27", &bare, 3.75);
+        assert!(out.data.as_chunks::<4>().0.iter().any(|p| p[0] > 0), "the clock is still on the glass");
     }
 
     #[test]
     fn the_face_lights_no_channel_the_glass_would_mangle() {
         // `haotian`'s glass shows the buffer's blue byte as both red and blue
         // (see AGENT.md), so a face whose lit pixels all have red equal to
-        // blue is a face that phone shows as it was drawn.
+        // blue is a face that phone shows as it was drawn. Everything on it is
+        // grey or white for that reason.
         let (mut out, f) = screen();
-        face(&mut out, &f, "03:27", 3.75);
+        face(&mut out, &f, "03:27", &facts(), 3.75);
         let wrong: Vec<[u8; 4]> = out.data.as_chunks::<4>().0.iter().copied().filter(|p| p[0] != p[2]).collect();
         assert!(wrong.is_empty(), "{} pixels depend on a channel the glass mangles: {:?}", wrong.len(), wrong.first());
     }
@@ -418,20 +492,20 @@ mod tests {
     fn the_face_moves_with_the_minute_so_no_pixel_is_lit_for_long() {
         let (mut one, f) = screen();
         let (mut two, f2) = screen();
-        face(&mut one, &f, "03:20", 3.75);
-        face(&mut two, &f2, "03:21", 3.75);
+        face(&mut one, &f, "03:20", &facts(), 3.75);
+        face(&mut two, &f2, "03:21", &facts(), 3.75);
         assert_ne!(one.data, two.data, "the next minute's face stands somewhere else");
         // And it stays on the glass, whatever minute it is.
         for minute in 0..60 {
             let mut out = one.clone();
-            face(&mut out, &f, &format!("03:{minute:02}"), 3.75);
+            face(&mut out, &f, &format!("03:{minute:02}"), &facts(), 3.75);
             assert!(!out.data.as_chunks::<4>().0.iter().all(|p| p[..3] == [0, 0, 0]), "minute {minute} is on the glass");
             assert_eq!(out.w, 1440, "the face does not resize the frame");
         }
         // The odd clock a phone whose RTC never set gives, without a minute,
         // stands in the middle rather than panicking.
         let mut out = one.clone();
-        face(&mut out, &f, "", 3.75);
+        face(&mut out, &f, "", &facts(), 3.75);
         assert_eq!(drift("", 3.75), 3.75 * 0.0);
     }
 }
