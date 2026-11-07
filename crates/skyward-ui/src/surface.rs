@@ -14,53 +14,6 @@ pub trait Surface {
     fn settle(&mut self) -> Result<()>;
 }
 
-/// Byte order of the scanout buffer against the canvas's RGBA.
-#[cfg(any(target_os = "android", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Order {
-    Rgba,
-    Bgra,
-}
-
-/// The order the canvas's red, green, blue and alpha have to be written in
-/// for a scanout buffer of `fourcc`.
-///
-/// DRM names a format by its bits from the most significant down, so a
-/// little-endian machine lays the bytes out the other way: `Xrgb8888` is
-/// `[B, G, R, X]` in memory, and the canvas's `[R, G, B, A]` reaches it only
-/// by swapping the two end bytes. `Xbgr8888` is `[R, G, B, X]`, and what the
-/// canvas holds goes straight in.
-///
-/// The high byte is dropped by the display controller either way: a mode
-/// that reads `X` ignores it, and one that reads `A` takes the canvas's
-/// opaque 255, which is what these pages are.
-#[cfg(any(target_os = "android", test))]
-pub(crate) fn order_of(fourcc: u32) -> Order {
-    // The fourcc codes the `drm` crate carries, named here so that the choice
-    // is made and tested without it. Each spells its bytes the way the format
-    // is written: 'XB24' is 0x34324258.
-    const XB24: u32 = 0x3432_4258; // Xbgr8888: [R, G, B, X] in memory
-    const AB24: u32 = 0x3432_4241; // Abgr8888: [R, G, B, A]
-    const XR24: u32 = 0x3432_5258; // Xrgb8888: [B, G, R, X]
-    const AR24: u32 = 0x3432_5241; // Argb8888: [B, G, R, A]
-    match fourcc {
-        XB24 | AB24 => Order::Rgba,
-        XR24 | AR24 => Order::Bgra,
-        // A format this does not know is written as the one the canvas's
-        // bytes reach by turning them round, which is what the panel shows
-        // most often; a buffer of another format is a fault of its own.
-        _ => Order::Bgra,
-    }
-}
-
-/// The 32-bit RGB formats a scanout buffer may be made in, the ones whose
-/// pixels the canvas reaches by turning nothing or two bytes round.
-///
-/// `XB24` first: it is the order the canvas already holds its bytes in, and
-/// what a haotian's own recovery drives its panel with.
-#[cfg(any(target_os = "android", test))]
-pub(crate) const SCANOUT: [u32; 4] = [0x3432_4258, 0x3432_4241, 0x3432_5258, 0x3432_5241];
-
 /// How Qualcomm's display driver drives a mode, from the text of the
 /// connector's mode_properties blob: key=value lines, a block per mode_name.
 #[cfg(any(target_os = "android", test))]
@@ -69,9 +22,6 @@ struct SdeMode {
     /// Layer mixers in the mode's topology, each blending one vertical
     /// strip of the screen.
     mixers: u32,
-    /// Whether the picture is compressed over the link. The driver works the
-    /// rate out from the panel it was told about at boot, so this is read
-    /// only to say in the summary how the mode is driven.
     dsc: bool,
 }
 
@@ -79,8 +29,7 @@ struct SdeMode {
 impl SdeMode {
     fn find(text: &str, name: &str) -> Result<SdeMode> {
         let mut current = false;
-        let mut topology = None;
-        let mut dsc = false;
+        let (mut topology, mut dsc) = (None, false);
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
             if key == "mode_name" {
@@ -108,128 +57,129 @@ impl SdeMode {
     }
 }
 
-/// The block of parameters the display controller starts its subpixel
-/// renderer with, field for field as the recovery that gets these pages' colours
-/// right writes it.
-///
-/// The panel in a haotian is a pen tile one: red and blue dots sit on one
-/// diagonal grid and green dots between them, so the dots that carry a pixel's
-/// colour are not all underneath it. The glass itself rearranges nothing --
-/// the display controller does, and only once it has been handed this block.
-/// Run without it, the controller gives the glass plain RGB and the dots take
-/// the wrong components: red and blue dots are lit as the same component,
-/// which is why these pages came out with blue as magenta and red as near
-/// black while green, white and black looked right.
-///
-/// The parameters are Qualcomm's driver's own, and the figures in them are the
-/// panel's: the pattern its dots repeat in (`cfg13`, every other dot of a
-/// line), the twelve bits a pixel's colour is spread over (`cfg15`), the taps
-/// of the filter that decides how much of a pixel each dot takes (`cfg16`,
-/// `cfg17`).
-///
-/// The taps are the part that has to be right for this panel. The phone's own
-/// UI library carries two sets and picks between them by `ro.boot.hardware.sku`;
-/// the set it picks for a haotian weighs the red and the blue of a pixel alike,
-/// and on the glass that showed every saturated colour as the average of its
-/// red and blue -- the red of "wipe" and the orange of "reboot" both came out
-/// purple. The set written here is the other one, the one the TWRP recovery for
-/// these phones writes, which keeps the two apart.
-///
-/// The `SDE_SPR_INIT_CFG_V2` property takes all of this; the first version of
-/// the property, which phones a generation older carry, takes the same block
-/// without its last two fields.
+/// Sub-pixel rendering by the display processor. A panel that shows two of
+/// the three colours at each pixel, and leaves the rendering for that to the
+/// display processor, names its layout as spr_pack_type in the connector's
+/// capabilities blob; without the rendering, its red sub-pixels show the
+/// blue of the frame. The CRTC takes the setup in SDE_SPR_INIT_CFG_V1, or
+/// in SDE_SPR_INIT_CFG_V2, which adds the cfg18 fields after the first's.
 #[cfg(any(target_os = "android", test))]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SprInit {
-    /// Zero: the renderer is asked to work. `SPR_FLAG_BYPASS`, bit 0, would
-    /// ask it to step aside.
-    flags: u64,
-    cfg0: u16,
-    cfg1: u16,
-    cfg2: u16,
-    cfg3: u16,
-    cfg4: u16,
-    cfg5: u16,
-    cfg6: u16,
-    /// How wide the repeating pattern of the panel's dots is, in dots.
-    cfg7: u16,
-    cfg8: u16,
-    cfg9: u16,
-    cfg10: u32,
-    /// The layout of the dots in a line, as the pattern's own words.
-    cfg11: [u16; 4],
-    cfg12: [u16; 4],
-    /// The bits of one line of dots: `0x155` is every other one.
-    cfg13: [u16; 4],
-    /// Where each of the panel's channels starts in the bits a pixel is
-    /// spread over.
-    cfg14: [u16; 5],
-    /// The ramp the twelve bits a pixel are spread over, from none of them to
-    /// all of them.
-    cfg15: [u16; 32],
-    /// Rust and C pad a struct of this kind in the same place; the block the
-    /// kernel reads is the same at every start only if the padding is written
-    /// too, so it is a field here rather than left to the compiler.
-    _pad: [u8; 2],
-    /// The taps of the filter, at each position of the pattern.
-    cfg16: [i32; 16],
-    cfg17: [i32; 24],
-    cfg18_en: u16,
-    cfg18: [u8; 7],
-    _pad_end: [u8; 3],
-}
+mod spr {
+    use anyhow::{bail, Result};
 
-/// The length of the block the first version of the property takes: the block
-/// above without its last two fields.
-#[cfg(any(target_os = "android", test))]
-const SPR_INIT_V1: usize = 0x128;
+    /// Red and blue taken at every other pixel, green at each.
+    const DECIMATION: [u16; 4] = [1, 0, 1, 0];
+    /// Two colour phases, eight steps apart.
+    const COLOUR_PHASE_STEP: u16 = 8;
+    const COLOUR_PHASE_REPEAT: u16 = 2;
+    const COLOUR_PHASES: [i32; 24] = [-2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    /// Filtering through four taps, with their coefficients.
+    const FOUR_TAP: u16 = 2;
+    const FOUR_TAP_COEFFICIENTS: [i32; 16] = [128, 256, 128, 0, 86, 241, 164, 21, 52, 204, 204, 52, 21, 164, 241, 86];
+    const ADAPTIVE_YYGM: u16 = 0;
+    const ADAPTIVE_STRENGTHS: [u16; 5] = [0, 4, 8, 12, 16];
+    const OPR_GAINS: [u16; 4] = [341, 341, 341, 0];
+    const OPR_OFFSETS: [u16; 32] = [
+        0, 132, 264, 396, 529, 661, 793, 925, 1057, 1189, 1321, 1453, 1586, 1718, 1850, 1982, 2114, 2246, 2378, 2510, 2643, 2775, 2907,
+        3039, 3171, 3303, 3435, 3567, 3700, 3832, 3964, 4095,
+    ];
 
-/// The length of the block the current version of the property takes.
-#[cfg(any(target_os = "android", test))]
-const SPR_INIT_V2: usize = 0x130;
+    /// The layout the capabilities blob names, among its key=value lines.
+    pub fn pack_type(capabilities: &str) -> Option<&str> {
+        capabilities.lines().find_map(|line| line.strip_prefix("spr_pack_type="))
+    }
 
-#[cfg(any(target_os = "android", test))]
-impl SprInit {
-    /// The block to hand the controller: the one the TWRP recovery for these
-    /// phones writes, whose taps keep a pixel's red and blue apart.
-    fn for_panel() -> SprInit {
-        SprInit {
-            flags: 0,
-            cfg0: 1,
-            cfg1: 1,
-            cfg2: 1,
-            cfg3: 0,
-            cfg4: 0,
-            cfg5: 8,
-            cfg6: 2,
-            cfg7: 2,
-            cfg8: 0,
-            cfg9: 0,
-            cfg10: 0,
-            cfg11: [1, 0, 1, 0],
-            cfg12: [0; 4],
-            cfg13: [0x155, 0x155, 0x155, 0],
-            cfg14: [0, 4, 8, 0xc, 0x10],
-            cfg15: [
-                0, 0x84, 0x108, 0x18c, 0x211, 0x295, 0x319, 0x39d, 0x421, 0x4a5, 0x529, 0x5ad, 0x632, 0x6b6, 0x73a, 0x7be, 0x842, 0x8c6, 0x94a,
-                0x9ce, 0xa53, 0xad7, 0xb5b, 0xbdf, 0xc63, 0xce7, 0xd6b, 0xdef, 0xe74, 0xef8, 0xf7c, 0xfff,
-            ],
-            cfg16: [128, 256, 128, 0, 86, 241, 164, 21, 52, 204, 204, 52, 21, 164, 241, 86],
-            cfg17: [-2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            cfg18_en: 0,
-            cfg18: [0; 7],
-            _pad: [0; 2],
-            _pad_end: [0; 3],
+    /// The setup for a panel laid out as `pack_type`, as the CRTC property
+    /// `property` takes it: the driver's structure, its fields in order and
+    /// aligned as the phone's C compiler aligns them.
+    pub fn setup(pack_type: &str, property: &str) -> Result<Vec<u8>> {
+        if pack_type != "pentile" {
+            bail!("the panel's sub-pixels are laid out as {pack_type}, and only a pentile layout is set up");
+        }
+        let cfg18 = match property {
+            "SDE_SPR_INIT_CFG_V1" => false,
+            "SDE_SPR_INIT_CFG_V2" => true,
+            other => bail!("no sub-pixel rendering setup is laid out for {other}"),
+        };
+        let mut out = Vec::new();
+        // flags
+        out.extend(0u64.to_ne_bytes());
+        // cfg0 to cfg9: the block on, no white sub-pixel, and the phases,
+        // filter and adaptive mode
+        put16(&mut out, &[1, 1, 1, 0, 0, COLOUR_PHASE_STEP, COLOUR_PHASE_REPEAT, FOUR_TAP, ADAPTIVE_YYGM, 0]);
+        // cfg10
+        out.extend(0u32.to_ne_bytes());
+        // cfg11 to cfg15
+        put16(&mut out, &DECIMATION);
+        put16(&mut out, &[0; 4]);
+        put16(&mut out, &OPR_GAINS);
+        put16(&mut out, &ADAPTIVE_STRENGTHS);
+        put16(&mut out, &OPR_OFFSETS);
+        // cfg16 and cfg17, on four bytes
+        out.extend([0; 2]);
+        put32(&mut out, &FOUR_TAP_COEFFICIENTS);
+        put32(&mut out, &COLOUR_PHASES);
+        // cfg18_en and cfg18, off
+        if cfg18 {
+            out.extend([0; 9]);
+        }
+        // The structure ends on eight bytes, as its flags are aligned.
+        out.resize(out.len().next_multiple_of(8), 0);
+        Ok(out)
+    }
+
+    fn put16(out: &mut Vec<u8>, values: &[u16]) {
+        for v in values {
+            out.extend(v.to_ne_bytes());
         }
     }
 
-    /// The bytes the property's blob is made of: every field an integer, in
-    /// the order the driver declares them, with no gap left un-written.
-    fn bytes(&self) -> &[u8] {
-        // A struct of integers of this shape has the layout its size says and
-        // no padding left unwritten, so its bytes are what C would hand over.
-        unsafe { std::slice::from_raw_parts(std::ptr::from_ref(self).cast(), std::mem::size_of::<SprInit>()) }
+    fn put32(out: &mut Vec<u8>, values: &[i32]) {
+        for v in values {
+            out.extend(v.to_ne_bytes());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn u16_at(b: &[u8], at: usize) -> u16 {
+            u16::from_ne_bytes([b[at], b[at + 1]])
+        }
+
+        fn i32_at(b: &[u8], at: usize) -> i32 {
+            i32::from_ne_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+        }
+
+        #[test]
+        fn the_layout_is_read_from_the_capabilities() {
+            let text = "panel name=xiaomi o2 42 02 0a cmd mode dsc dsi panel\nspr_pack_type=pentile\nspr_pack_type_mode=BG-RG Type B\n";
+            assert_eq!(pack_type(text), Some("pentile"));
+            assert_eq!(pack_type("panel name=xiaomi 42 02 0a cmd mode dsc dsi panel\nspr_pack_type_mode=BG-RG Type B\n"), None, "the mode alone names none");
+        }
+
+        #[test]
+        fn the_pentile_setup_is_laid_out_as_the_driver_s_structure() {
+            let v1 = setup("pentile", "SDE_SPR_INIT_CFG_V1").unwrap();
+            let v2 = setup("pentile", "SDE_SPR_INIT_CFG_V2").unwrap();
+            assert_eq!((v1.len(), v2.len()), (296, 304));
+            assert_eq!(v1[..292], v2[..292], "the second adds fields after the first's");
+            assert_eq!(v2[292..], [0; 12], "cfg18 off");
+            assert_eq!(u16_at(&v1, 8), 1, "cfg0, the block on");
+            assert_eq!((u16_at(&v1, 18), u16_at(&v1, 20), u16_at(&v1, 22), u16_at(&v1, 24)), (8, 2, 2, 0), "cfg5 to cfg8");
+            assert_eq!((u16_at(&v1, 32), u16_at(&v1, 34)), (1, 0), "cfg11: red decimated, green not");
+            assert_eq!(u16_at(&v1, 68), 132, "cfg15 starts at 66");
+            assert_eq!(u16_at(&v1, 128), 4095, "and ends at 130");
+            assert_eq!((i32_at(&v1, 132), i32_at(&v1, 136)), (128, 256), "cfg16 starts at 132");
+            assert_eq!((i32_at(&v1, 196), i32_at(&v1, 200), i32_at(&v1, 244)), (-2, 2, 2), "cfg17 starts at 196");
+        }
+
+        #[test]
+        fn only_a_pentile_layout_and_the_known_properties_are_set_up() {
+            assert!(setup("rgbw", "SDE_SPR_INIT_CFG_V2").is_err());
+            assert!(setup("pentile", "SDE_SPR_INIT_CFG_V3").is_err());
+        }
     }
 }
 
@@ -237,8 +187,8 @@ impl SprInit {
 mod tests {
     use super::*;
 
-    const ISHTAR: &str = "mode_name=1440x3200x60cmd\nbit_clk_rate=1360000000\nbpp_mode=2\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
-                          mode_name=1440x3200x120cmd\nsubmode_idx=1\nbpp_mode=2\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
+    const ISHTAR: &str = "mode_name=1440x3200x60cmd\nbit_clk_rate=1360000000\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
+                          mode_name=1440x3200x120cmd\nsubmode_idx=1\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n\
                           mode_name=1080x2400x60cmd\ndsc_mode=0\ntopology=sde_singlepipe\n";
 
     #[test]
@@ -246,85 +196,6 @@ mod tests {
         assert_eq!(SdeMode::find(ISHTAR, "1440x3200x120cmd").unwrap(), SdeMode { mixers: 2, dsc: true });
         assert_eq!(SdeMode::find(ISHTAR, "1080x2400x60cmd").unwrap(), SdeMode { mixers: 1, dsc: false });
         assert!(SdeMode::find(ISHTAR, "1440x3200x90cmd").is_err());
-    }
-
-    #[test]
-    fn a_mode_without_a_rate_or_a_variant_of_its_own_is_read_as_the_rest() {
-        // What the driver chose for the link is not read here: the phone's own
-        // recovery sets no connector property, and the rate the compressor
-        // runs at is the driver's own business. Only the topology and whether
-        // the mode is compressed are needed, and a mode that says nothing
-        // about either is taken as one mixer, uncompressed.
-        let haotian = "mode_name=1440x3200x120cmd\nsubmode_idx=1\nbpp_mode=2\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n";
-        let mode = SdeMode::find(haotian, "1440x3200x120cmd").unwrap();
-        assert!(mode.dsc && mode.mixers == 2);
-        let bare = "mode_name=a\nbpp_mode=x\ntopology=sde_singlepipe\n";
-        assert_eq!(SdeMode::find(bare, "a").unwrap(), SdeMode { mixers: 1, dsc: false });
-    }
-
-    #[test]
-    fn a_format_whose_bytes_name_red_first_takes_the_canvas_as_it_is() {
-        // 'XB24' and 'AB24' lay their bytes out [R, G, B, x] on a machine of
-        // this kind's byte order, which is the canvas's own order.
-        assert_eq!(order_of(0x3432_4258), Order::Rgba, "Xbgr8888");
-        assert_eq!(order_of(0x3432_4241), Order::Rgba, "Abgr8888");
-    }
-
-    #[test]
-    fn a_format_whose_bytes_name_blue_first_has_its_ends_swapped() {
-        // 'XR24' and 'AR24' lay theirs out [B, G, R, x]: red and blue reach
-        // the panel the wrong way round unless the canvas's are swapped.
-        assert_eq!(order_of(0x3432_5258), Order::Bgra, "Xrgb8888");
-        assert_eq!(order_of(0x3432_5241), Order::Bgra, "Argb8888");
-    }
-
-    #[test]
-    fn every_format_offered_for_scanout_is_one_the_panel_can_be_handed() {
-        // What the pick offers has to be exactly what the order is known for:
-        // a format offered but not known would be presented with its red and
-        // blue the wrong way round.
-        for f in SCANOUT {
-            assert!(matches!(order_of(f), Order::Rgba | Order::Bgra), "0x{f:08x}");
-            assert!(f == 0x3432_4258 || f == 0x3432_4241 || f == 0x3432_5258 || f == 0x3432_5241, "0x{f:08x}");
-        }
-        assert_eq!(SCANOUT.len(), 4, "the four 32-bit RGB formats the canvas can reach");
-    }
-
-    #[test]
-    fn the_subpixel_renderer_is_told_the_layout_of_the_panels_dots() {
-        // The block the recovery that gets the colours right writes, byte for
-        // byte: the renderer left working, the dots' pattern every other one of
-        // a line, and the twelve bits a pixel spread over the dots that carry
-        // them.
-        let block = SprInit::for_panel();
-        let b = block.bytes();
-        assert_eq!(b.len(), SPR_INIT_V2, "the block the current property takes");
-        assert_eq!(&b[0x00..0x08], &[0; 8], "flags: the renderer works rather than stands aside");
-        assert_eq!(&b[0x08..0x12], &[1, 0, 1, 0, 1, 0, 0, 0, 0, 0], "cfg0 to cfg4");
-        assert_eq!(u16::from_le_bytes([b[0x12], b[0x13]]), 8, "cfg5");
-        assert_eq!(u16::from_le_bytes([b[0x14], b[0x15]]), 2, "cfg6");
-        assert_eq!(u16::from_le_bytes([b[0x16], b[0x17]]), 2, "cfg7: the width of the dots' pattern");
-        assert_eq!(&b[0x20..0x28], &[1, 0, 0, 0, 1, 0, 0, 0], "cfg11");
-        assert_eq!(&b[0x30..0x38], &[0x55, 0x01, 0x55, 0x01, 0x55, 0x01, 0, 0], "cfg13: every other dot");
-        assert_eq!(&b[0x38..0x42], &[0, 0, 4, 0, 8, 0, 0xc, 0, 0x10, 0], "cfg14: where each channel starts");
-        assert_eq!(&b[0x42..0x44], &[0, 0], "cfg15 starts at none of the bits");
-        assert_eq!(&b[0x80..0x82], &[0xff, 0x0f], "cfg15 ends at all twelve of them");
-        assert_eq!(
-            &b[0x84..0xa4],
-            &[0x80, 0, 0, 0, 0, 1, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x56, 0, 0, 0, 0xf1, 0, 0, 0, 0xa4, 0, 0, 0, 0x15, 0, 0, 0],
-            "cfg16: the taps of the filter, red and blue kept apart"
-        );
-        assert_eq!(&b[0xc4..0xcc], &[0xfe, 0xff, 0xff, 0xff, 2, 0, 0, 0], "cfg17: the first taps");
-        assert_eq!(&b[0xf4..0xfc], &[2, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff], "cfg17: its thirteenth and fourteenth");
-        assert_eq!(&b[0x124..], &[0; 12], "nothing after cfg17 is asked for");
-    }
-
-    #[test]
-    fn the_first_version_of_the_property_takes_the_block_without_its_tail() {
-        // A driver from before the current property takes the same block
-        // without the last two fields, which is exactly eight bytes shorter.
-        assert_eq!(SprInit::for_panel().bytes().len(), SPR_INIT_V2, "the block as the struct is");
-        assert_eq!(SPR_INIT_V2 - SPR_INIT_V1, 8, "the two fields the first version has not");
     }
 }
 
@@ -381,6 +252,13 @@ pub mod kms {
         fn offsets(&self) -> [u32; 4] {
             [0; 4]
         }
+    }
+
+    /// Byte order of the scanout buffer against the canvas's RGBA.
+    #[derive(Clone, Copy, Debug)]
+    enum Order {
+        Rgba,
+        Bgra,
     }
 
     struct Buf {
@@ -443,27 +321,6 @@ pub mod kms {
         .ok_or_else(|| anyhow!("{} offers no {choice}", info.name().to_string_lossy()))
     }
 
-    /// The CRTC property the display controller's subpixel renderer is started
-    /// through, and the length of the block that version of it takes: the
-    /// current version where the driver has it, the first one otherwise.
-    ///
-    /// The property is what a panel whose glass rearranges no dots is driven
-    /// with, and a driver that has the renderer at all has one of the two.
-    fn spr_property(props: &Props) -> Option<(property::Handle, usize)> {
-        if let Ok((id, _)) = props.get("SDE_SPR_INIT_CFG_V2") {
-            return Some((id, SPR_INIT_V2));
-        }
-        props.get("SDE_SPR_INIT_CFG_V1").ok().map(|(id, _)| (id, SPR_INIT_V1))
-    }
-
-    /// Whether the panel's own glass leaves the drawing of its subpixels to
-    /// the display controller: the bootloader says so in a property of its
-    /// own, which is the one Android's recovery reads before it starts the
-    /// renderer.
-    fn subpixel_rendering() -> bool {
-        skyward_sys::bool_prop("ro.boot.display_ap_spr", false)
-    }
-
     /// Built-in panel interfaces. Writeback and external outputs are never
     /// the recovery's screen.
     fn is_panel(interface: connector::Interface) -> bool {
@@ -522,6 +379,10 @@ pub mod kms {
                 if let Ok((_, blob)) = props.get("mode_properties") {
                     let text = card.get_property_blob(blob).context("read mode_properties")?;
                     writeln!(out, "  mode_properties: {}", String::from_utf8_lossy(&text).replace('\n', " | "))?;
+                }
+                if let Ok((_, blob)) = props.get("capabilities") {
+                    let text = card.get_property_blob(blob).context("read capabilities")?;
+                    writeln!(out, "  capabilities: {}", String::from_utf8_lossy(&text).replace('\n', " | "))?;
                 }
                 for m in c.modes() {
                     let (w, hgt) = m.size();
@@ -690,9 +551,6 @@ pub mod kms {
                 }
                 Err(_) => SdeMode { mixers: 1, dsc: false },
             };
-            // One plane per layer mixer, each covering its own strip, which is
-            // how this phone's own recovery drives the same mode: two planes,
-            // 720 wide each, one at x=0 and one at x=720.
             let strips = layout.mixers as usize;
             if w % layout.mixers != 0 {
                 return Err(anyhow!("{w} pixels do not split into {strips} strips"));
@@ -720,14 +578,16 @@ pub mod kms {
             }
             candidates.truncate(strips);
 
-            // `XB24` first, which is the order the canvas already holds its
-            // bytes in -- and what this phone's own recovery hands its panel.
-            let fourcc = SCANOUT
+            let pick = [
+                (DrmFourcc::Xbgr8888, Order::Rgba),
+                (DrmFourcc::Abgr8888, Order::Rgba),
+                (DrmFourcc::Xrgb8888, Order::Bgra),
+                (DrmFourcc::Argb8888, Order::Bgra),
+            ];
+            let (fourcc, order) = pick
                 .into_iter()
-                .find(|f| candidates.iter().all(|c| c.1.contains(f)))
+                .find(|(f, _)| candidates.iter().all(|c| c.1.contains(&(*f as u32))))
                 .ok_or_else(|| anyhow!("the primary planes share none of the 32-bit RGB formats"))?;
-            let order = order_of(fourcc);
-            let fourcc = DrmFourcc::try_from(fourcc).expect("the formats chosen are ones it names");
 
             let make = || -> Result<Buf> {
                 let db = card.create_dumb_buffer((w, h), fourcc, 32).context("create dumb buffer")?;
@@ -755,24 +615,42 @@ pub mod kms {
             let blob = card.create_property_blob(&mode).context("create mode blob")?;
             let first = card.create_property_blob(preferred).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
-            // The mode is DSC-compressed, and the compressor's rate and every
-            // other setting of the link is the driver's own: worked out at boot
-            // from the panel the device tree describes, which is the state the
-            // boot splash was drawn in. This phone's own recovery sets no
-            // connector property either -- only `MODE_ID`, `ACTIVE`, the
-            // plane's frame and rectangles, and the subpixel block below.
-            //
-            // The experiments that forced the rate here are what the pages'
-            // colours are still paying for: with `bpp_mode` written from the
-            // mode's description and the DSC variant selected by hand, the
-            // panel is decompressed by arithmetic the phone may not have
-            // chosen. Leave the link as the driver left it.
+            // The mode is DSC-compressed: select its DSC variant, as Android's
+            // compositor does.
             if layout.dsc {
                 let (id, _) = conn_props.get("dsc_mode")?;
                 req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
             }
+            // Frame starts are posted to the hardware: the driver's own
+            // default on display hardware of this generation, and Android's
+            // compositor sets the same.
+            if let Ok((id, _)) = conn_props.get("frame_trigger_mode") {
+                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "posted_start")?));
+            }
             req.add_property(crtc, crtc_props.handle("MODE_ID")?, first);
             req.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(true));
+            // A panel whose sub-pixel rendering is the display processor's
+            // has it set up with the mode; the switch to the fastest refresh,
+            // a mode set of its own, carries it again.
+            let spr = match conn_props.get("capabilities") {
+                Ok((_, caps)) => {
+                    let text = card.get_property_blob(caps).context("read capabilities")?;
+                    match spr::pack_type(&String::from_utf8_lossy(&text)) {
+                        Some(pack_type) => {
+                            let name = ["SDE_SPR_INIT_CFG_V2", "SDE_SPR_INIT_CFG_V1"]
+                                .into_iter()
+                                .find(|name| crtc_props.get(name).is_ok())
+                                .ok_or_else(|| anyhow!("the panel leaves its {pack_type} sub-pixel rendering to a CRTC that takes no setup for it"))?;
+                            Some((crtc_props.handle(name)?, spr::setup(pack_type, name)?, name))
+                        }
+                        None => None,
+                    }
+                }
+                Err(_) => None,
+            };
+            if let Some((id, setup, _)) = &spr {
+                req.add_property(crtc, *id, card.create_property_blob(setup.as_slice()).context("create sub-pixel rendering blob")?);
+            }
             for &other in attached.iter().filter(|&&p| !candidates.iter().any(|c| c.0 == p)) {
                 let props = Props::read(&card, other)?;
                 req.add_property(other, props.handle("FB_ID")?, property::Value::Framebuffer(None));
@@ -795,31 +673,6 @@ pub mod kms {
                 req.add_property(*plane, props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
                 planes.push((*plane, fb_prop));
             }
-            // A panel whose glass renders its own subpixels is driven with
-            // the block that says how its dots are laid out; one whose glass
-            // does not leaves that to the controller, and the controller is
-            // handed the block that keeps a pixel's red and blue apart. Left
-            // unstarted the dots are lit as plain RGB -- red and blue dots
-            // taking the same component -- which is the colour fault these
-            // pages had. The bootloader knows which panel is here and says so.
-            let mut spr = String::from("-");
-            if let Some((prop, len)) = spr_property(&crtc_props) {
-                if subpixel_rendering() {
-                    let block = SprInit::for_panel();
-                    match card.create_property_blob(&block.bytes()[..len]) {
-                        Ok(value) => {
-                            req.add_property(crtc, prop, value);
-                            spr = format!("v{}", if len == SPR_INIT_V2 { 2 } else { 1 });
-                        }
-                        // The pages are still readable with the wrong colours,
-                        // so a block that cannot be made is said in the
-                        // summary rather than left to fail the display.
-                        Err(error) => spr = format!("failed ({error})"),
-                    }
-                } else {
-                    spr = String::from("off");
-                }
-            }
             // The panel comes up in its preferred mode, then switches to the
             // fastest. Powered up in the fast mode directly, the display
             // controller runs at the fast rate but the panel keeps its own:
@@ -830,70 +683,44 @@ pub mod kms {
             if mode.vrefresh() != preferred.vrefresh() {
                 let mut req = atomic::AtomicModeReq::new();
                 req.add_property(crtc, crtc_props.handle("MODE_ID")?, blob);
+                if let Some((id, setup, _)) = &spr {
+                    req.add_property(crtc, *id, card.create_property_blob(setup.as_slice()).context("create sub-pixel rendering blob")?);
+                }
                 commit(&card, req, AtomicCommitFlags::ALLOW_MODESET).context("switch the panel to its fastest refresh")?;
             }
 
             let ids: Vec<u32> = planes.iter().map(|p| u32::from(p.0)).collect();
-            // What the panel was told, not merely how it was found: a colour
-            // that reaches it wrong is read from the format each plane is
-            // handed, the colour space it is asked to convert from, and the
-            // strips the layer mixers blend. All of it goes in the summary
-            // the recovery writes to the kernel log once the surface is up.
-            let mut told = String::new();
-            for &(p, _) in &planes {
-                let props = Props::read(&card, p).context("read plane properties")?;
-                let get = |name: &str| props.value(name).map(|v| v.to_string()).unwrap_or_else(|_| "-".into());
-                let colour = ["COLOR_ENCODING", "COLOR_RANGE", "COLOR_SPACE", "CSC_MATRIX", "ALPHA_ENABLE", "PIXEL_FORMAT"]
-                    .iter()
-                    .map(|n| format!("{n}={}", get(n)))
+            // What the connector and the CRTC were left holding, read back: the
+            // link's own settings are the driver's, and a sub-pixel block that
+            // was asked for but did not arrive is worth telling apart from one
+            // that did. This line is the only place a phone with the pages up
+            // can say either.
+            let link = match Props::read(&card, conn.handle()) {
+                Ok(props) => ["dsc_mode", "bpp_mode", "frame_trigger_mode"]
+                    .into_iter()
+                    .filter_map(|name| props.value(name).ok().map(|value| format!("{name}={value}")))
                     .collect::<Vec<_>>()
-                    .join(",");
-                told.push_str(&format!(
-                    " plane {} src {}+{} {}x{} crtc {}+{} {}x{} {colour};",
-                    u32::from(p),
-                    get("SRC_X"),
-                    get("SRC_Y"),
-                    get("SRC_W"),
-                    get("SRC_H"),
-                    get("CRTC_X"),
-                    get("CRTC_Y"),
-                    get("CRTC_W"),
-                    get("CRTC_H"),
-                ));
-            }
-            let crtc_props_now = Props::read(&card, crtc).context("read CRTC properties")?;
-            // The subpixel block as the driver holds it now: a blob id of zero
-            // means the write did not take at all, and the bytes say which of
-            // the two versions of the block the CRTC kept.
-            let kept = crtc_props_now.value("SDE_SPR_INIT_CFG_V2").ok().filter(|&id| id != 0);
-            let spr_kept = match kept.and_then(|id| card.get_property_blob(id).ok()) {
-                Some(bytes) => format!("{} bytes, starts {:02x?}", bytes.len(), &bytes[..bytes.len().min(8)]),
-                None => String::from("no blob"),
+                    .join(","),
+                Err(_) => String::from("?"),
             };
-            // What the link was left at: the driver's own choices, which the
-            // phone's own recovery leaves alone too. Read beside the block
-            // because a compressor rate the panel was not made for is read as
-            // the picture with its channels mangled.
-            let conn_props_now = Props::read(&card, conn.handle()).context("read connector properties")?;
-            let link = ["dsc_mode", "bpp_mode", "frame_trigger_mode"]
-                .iter()
-                .map(|n| format!("{n}={}", conn_props_now.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
-                .collect::<Vec<_>>()
-                .join(",");
-            let crtc_colour = ["GAMMA_LUT", "DEGAMMA_LUT", "CTM", "COLOR_ENCODING", "COLOR_RANGE", "SDE_SPR_INIT_CFG_V2"]
-                .iter()
-                .map(|n| format!("{n}={}", crtc_props_now.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
-                .collect::<Vec<_>>()
-                .join(",");
+            let held = match &spr {
+                Some((_, _, name)) => {
+                    let value = Props::read(&card, crtc).ok().and_then(|props| props.value(name).ok()).unwrap_or(0);
+                    match card.get_property_blob(value) {
+                        Ok(blob) if !blob.is_empty() => format!("{name}, {} bytes held", blob.len()),
+                        _ => format!("{name}, nothing held"),
+                    }
+                }
+                None => String::from("-"),
+            };
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, link {link}, spr {spr} ({spr_kept}), crtc {crtc_colour};{told}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, link {link}, sub-pixel rendering {held}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
                 mode.vrefresh(),
                 u32::from(crtc),
-                fourcc,
-                layout.dsc,
+                fourcc
             );
             Ok(KmsSurface { card, bufs, back: 1, flipping: false, planes, w, h, order, summary })
         }
@@ -901,7 +728,6 @@ pub mod kms {
         pub fn describe(&self) -> &str {
             &self.summary
         }
-
     }
 
     impl Drop for KmsSurface {

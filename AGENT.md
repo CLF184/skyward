@@ -66,19 +66,20 @@ If a file has to outlive a start, it goes on persist as a small marker only.
 
 Found by comparing against YARP's live DRM state and against what the phone's
 own recovery writes. The format, the planes and the subpixel block below are
-what all three have in common. The connector's own settings are left to the
-driver: the phone's own recovery writes no connector property at all, and the
-driver works them out at boot from the panel the device tree describes, which
-is the state the boot splash is drawn in.
+what all three have in common. Beyond `dsc_mode` and the tear signal below the
+connector's own settings are left to the driver: the phone's own recovery writes
+no connector property at all, and the driver works them out at boot from the
+panel the device tree describes, which is the state the boot splash is drawn in.
 
 | What | Value | Why |
 | --- | --- | --- |
 | Format | `XB24` (`Xbgr8888`), first in `SCANOUT` | what the phone's own recovery hands over |
 | Planes | one per layer mixer, 720 wide each | `sde_dualpipe_dscmerge` topology |
 | `dsc_mode` | `dsc_enabled` | the mode is compressed; set through `enum_value`, skipped where the connector offers no such property |
-| `bpp_mode`, `frame_trigger_mode` | not set, the driver's own | the recovery whose colours are right sets neither |
+| `frame_trigger_mode` | `posted_start` | frame starts posted to the hardware, the driver's default on this generation and what Android's compositor sets |
+| `bpp_mode` | not set, the driver's own | the recovery whose colours are right never sets it |
 | `COLOR_ENCODING`, `COLOR_RANGE` | not set, the driver's own | same; the two writes were an experiment, and the plane state says the driver puts them there itself |
-| `SDE_SPR_INIT_CFG_V2` | the block `SprInit` makes | see below |
+| `SDE_SPR_INIT_CFG_V2` | the block `spr::setup` makes | see below |
 
 Everything is set in `surface.rs::KmsSurface::open`. `SdeMode::find` reads the
 topology and the DSC flag out of the connector's `mode_properties` blob.
@@ -104,52 +105,55 @@ renderer without being told the layout, and the dots were lit as plain RGB: the
 red dots and the blue dots take the same component of the buffer, which is the
 `(R, G, B)` arriving as `(B, G, B)` rule measured off the photographs.
 
-`surface.rs` now writes the block. `SprInit` is the payload field for field and
-`SprInit::for_panel` supplies the values. The numbers were read back out of two
-libraries: the stock recovery's own
-(`target/v013-haotian/system/lib64/librecovery_ui.so`, whose builder is at
-0x376b0 for the second version of the property and at 0x37750 for the first) and
-the TWRP recovery for these phones
-(`target/yarp-root/system/lib64/libtwrpminui.so`, whose builder is at 0x237f8).
-Both build the same struct and every table either of them uses is byte identical,
-but they pick different filter taps. The stock library keys the taps on
-`ro.boot.hardware.sku` and, for `haotian`, takes the set that weighs a pixel's
-red and blue alike (`cfg16` = `[0, 256, 256, 0]` four times, `cfg7` = 5). TWRP
-keys them on nothing and takes the set that keeps the two apart
-(`cfg16` = `[128, 256, 128, 0, 86, 241, 164, 21, 52, 204, 204, 52, 21, 164, 241,
-86]`, `cfg17` = `[-2, 2, …, 2, -2, …]`, `cfg7` = 2). The block written here is
-TWRP's, because TWRP's colours are the ones that are right on this panel.
-`KmsSurface::open` sets the blob on the CRTC when the CRTC offers the property and
-`ro.boot.display_ap_spr` says the glass leaves the work to the controller: both
-are what the two libraries gate on, so a phone whose panel renders its own
-subpixels is left alone.
+`surface.rs` writes the block, in `mod spr`: it reads the connector's
+`capabilities` blob, and a panel that names `spr_pack_type=pentile` there is one
+whose subpixel rendering is the controller's. The block is Qualcomm's
+`drm_msm_spr_init_cfg` laid out field for field, written into
+`SDE_SPR_INIT_CFG_V2` (the `_V1` of an older driver takes the same block without
+its last two fields) on the mode commit and again on the switch to the fastest
+refresh, since that is a mode set of its own. A panel that names no layout is
+left alone, so nothing is written for a phone whose glass renders its own
+subpixels. That gate is upstream's (`d7fefd7`).
 
-Whether it took is in the summary the surface writes to the kernel log once it
-is up: `... strips 2, dsc true, link dsc_mode=1,bpp_mode=…,frame_trigger_mode=…,
-spr v2 (304 bytes, starts [55, 01, …]), crtc …`. `spr v2` says the block was
-written (`v1` for the older property), `spr off` that the bootloader does not
-ask for one, `spr -` that the CRTC offers no such property; the bytes beside it
-are the block read back out of the CRTC, so `no blob` there means the write did
-not take even though it was asked for, and `link` says what the driver chose for
+The figures in the block are the panel's: `cfg13` = `0x155`, every other dot of a
+line; `cfg15`, the ramp the twelve bits a pixel are spread over; and the filter
+taps `cfg16`/`cfg17`, which decide how much of a pixel each dot takes. The taps
+are the part that had to be right, and they were read back out of two libraries:
+`target/v013-haotian/system/lib64/librecovery_ui.so` (builder at 0x376b0 for
+`V2`, 0x37750 for `V1`) and
+`target/yarp-root/system/lib64/libtwrpminui.so` (builder at 0x237f8). Both carry
+the same struct and byte identical tables, but they pick different taps: the
+stock library keys them on `ro.boot.hardware.sku` and gives `haotian` the set
+that weighs a pixel's red and blue alike (`cfg16` = `[0, 256, 256, 0]` four
+times, `cfg7` = 5), while TWRP keys them on nothing and writes the set that
+keeps the two apart (`cfg16` = `[128, 256, 128, 0, 86, 241, 164, 21, 52, 204,
+204, 52, 21, 164, 241, 86]`, `cfg17` = `[-2, 2, …, 2, -2, …]`, `cfg7` = 2). The
+block written is TWRP's, which is also what upstream's fix writes.
+
+Whether it took is in the summary the surface writes to the kernel log once it is
+up: `…, planes [97, 129] …, link dsc_mode=1,bpp_mode=…,frame_trigger_mode=…,
+sub-pixel rendering SDE_SPR_INIT_CFG_V2, 304 bytes held`. `sub-pixel rendering -`
+means the panel named no layout; `nothing held` means a block was asked for and
+the read-back of the CRTC did not find it; `link` is what the driver chose for
 the compressor and the tear signal.
 
-On the first build that wrote the block the magenta was gone — the pages stopped
-showing blue as magenta and red as near black — but the colours were still not
-what the phone's own recovery shows. So the block is part of the answer and not
-all of it. Photographs of the menu page on that build say what the block did:
-every saturated colour came out as the average of its red and its blue, which is
-what the stock library's `haotian` taps do — the red "wipe" icon (242, 83, 75)
-and the orange "reboot" icon (255, 146, 47) both showed as purple, while green,
-grey, white and black came through. The taps written now are TWRP's, which keep
-the two apart.
-What has been ruled out since: the SDE register dumps cannot tell
-these builds apart (the `spr_*` sub-blocks are byte identical in Skyward's,
-YARP's and the writing build's captures, and YARP differs from itself between
-two captures by as much as it differs from Skyward), so the dump holds the
-bootloader's leftovers rather than what a blob writes. What was removed on the
-strength of it: the connector's `bpp_mode` and `frame_trigger_mode` writes and
-the plane's `COLOR_ENCODING`/`COLOR_RANGE` writes, none of which the phone's own
-recovery makes.
+The two builds before the merge are part of why the block is right, and are
+worth remembering. The first one to write a block wrote the stock library's
+`haotian` values (`c965c23`): the magenta went, but photographs showed every
+saturated colour as the average of its red and blue — the red "wipe" icon
+(242, 83, 75) and the orange "reboot" icon (255, 146, 47) both came out purple,
+while green, grey, white and black came through — which is what the stock
+library's `cfg16` box average does. The second (`996f39d`) wrote TWRP's taps,
+the same figures upstream's block writes, and was never photographed before
+upstream's fix arrived and the merge took it.
+
+What has been ruled out, should the colours still need work: the SDE register
+dumps cannot tell these builds apart (the `spr_*` sub-blocks are byte identical
+in Skyward's, YARP's and the writing build's captures, and YARP differs from
+itself between two captures by as much as it differs from Skyward), so the dump
+holds the bootloader's leftovers rather than what a blob writes. The connector's
+`bpp_mode` and the plane's `COLOR_ENCODING`/`COLOR_RANGE` writes are gone as
+well, on the strength of the phone's own recovery making none of them.
 
 What follows was measured while the fault was still unexplained, and is kept
 because it still holds: every frame was wrong from the very first one Skyward
