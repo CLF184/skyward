@@ -342,6 +342,14 @@ CI (`.github/workflows/build-haotian.yml`) builds the image **and** runs
 Clippy is `-D warnings`, so an unused import or a needless borrow fails the
 build; `cargo fmt` habits matter.
 
+A release is a tag: `git push ssh://git@github.com/Rinrroy/skyward.git main v0.1.4`
+builds the same image and publishes it, with `SHA256SUMS` beside it, as a GitHub
+release named for the tag — the artifact a branch run leaves expires after
+thirty days, a release does not. Bump `[workspace.package] version` in
+`Cargo.toml` first (and let `cargo metadata` rewrite `Cargo.lock`), and put the
+release's own notes in `docs/releases/<tag>.md`; the workflow uses that file
+when it exists and the commits since the last release when it does not.
+
 ## Reading this repo's history
 
 Commit messages explain *why*, in plain prose, often at length. They are worth

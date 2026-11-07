@@ -3,10 +3,13 @@ name: Build haotian
 # The recovery for the Xiaomi 15 Pro alone: run it by hand from the Actions
 # tab, or push to any branch to have it built. The image lands in the run's
 # artifacts as a zip, named for the build and the stock version it is made on.
+# A `v*` tag is a release: the same image is built, and published with its
+# checksum so that a phone can be flashed from a link that does not expire.
 on:
   workflow_dispatch:
   push:
     branches: ["**"]
+    tags: ["v*"]
     paths:
       - "crates/**"
       - "devices/haotian.toml"
@@ -49,6 +52,10 @@ jobs:
   build:
     name: Build the recovery
     runs-on: ubuntu-24.04
+    # A tag publishes a release, which is a write to the repository; a branch
+    # only leaves an artifact and needs no more than to read it.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -155,3 +162,35 @@ jobs:
           path: out/${{ steps.pack.outputs.name }}.img
           if-no-files-found: error
           retention-days: 30
+
+      # A release is a tag. The artifact above is deleted after thirty days; a
+      # release is where a phone is flashed from a year later, so the image is
+      # published with a checksum beside it. The notes are the file the tag
+      # names where there is one, and the commits since the last release where
+      # there is not.
+      - name: Checksum the image
+        id: release
+        if: github.ref_type == 'tag'
+        run: |
+          set -eu
+          name="${{ steps.pack.outputs.name }}"
+          cd out
+          sha256sum "$name.img" > SHA256SUMS
+          cat SHA256SUMS
+          echo "notes=docs/releases/$GITHUB_REF_NAME.md" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          name="${{ steps.pack.outputs.name }}"
+          title="Skyward $GITHUB_REF_NAME for $DEVICE (Xiaomi 15 Pro)"
+          if [ -f "docs/releases/$GITHUB_REF_NAME.md" ]; then
+            gh release create "$GITHUB_REF_NAME" "out/$name.img" out/SHA256SUMS \
+              --title "$title" --notes-file "docs/releases/$GITHUB_REF_NAME.md"
+          else
+            gh release create "$GITHUB_REF_NAME" "out/$name.img" out/SHA256SUMS \
+              --title "$title" --generate-notes
+          fi
