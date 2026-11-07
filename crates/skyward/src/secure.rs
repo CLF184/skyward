@@ -380,8 +380,37 @@ fn register_again(registered: &[(String, String)]) -> Result<()> {
 /// into the place both readers take as the framework's, and the newer of
 /// the two readers drops the whole set over one description that says it
 /// is the phone's.
+///
+/// Its version is brought down to the oldest one for the same reason. The
+/// reader is the one the recovery was built with, and it drops the whole
+/// set over a version it does not know: a description written for a build
+/// of the platform newer than the recovery says so, and then nothing
+/// registers at all.
 fn as_framework(text: &str) -> String {
-    text.replace("type=\"device\"", "type=\"framework\"").replace("type='device'", "type='framework'")
+    let text = text.replace("type=\"device\"", "type=\"framework\"").replace("type='device'", "type='framework'");
+    oldest_version(&text)
+}
+
+/// The oldest version a description can name, which every reader knows.
+const OLDEST_VERSION: &str = "1.0";
+
+/// The text with the version on its `<manifest …>` line made
+/// [`OLDEST_VERSION`], or as it is when it names that version already or
+/// names none.
+fn oldest_version(text: &str) -> String {
+    const SAID: &str = "version=";
+    let Some(start) = text.find("<manifest") else { return text.to_string() };
+    let Some(element) = text[start..].split_once('>').map(|(element, _)| element) else { return text.to_string() };
+    let Some(at) = element.find(SAID) else { return text.to_string() };
+    let rest = &element[at + SAID.len()..];
+    let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { return text.to_string() };
+    let Some(end) = rest[1..].find(quote).map(|e| e + 1) else { return text.to_string() };
+    if rest[1..end] == *OLDEST_VERSION {
+        return text.to_string();
+    }
+    let from = start + at;
+    let to = start + at + SAID.len() + end + 1;
+    format!("{}version={quote}{OLDEST_VERSION}{quote}{}", &text[..from], &text[to..])
 }
 
 /// Say the same of the descriptions already there, which a recovery ships
@@ -428,5 +457,55 @@ fn answering_again(was: Option<u32>) -> Result<()> {
             anyhow::bail!("the service directory did not come back");
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::as_framework;
+
+    #[test]
+    fn a_description_of_the_phones_own_hardware_is_taken_as_the_frameworks() {
+        assert_eq!(
+            as_framework("<manifest version=\"8.0\" type=\"device\">\n"),
+            "<manifest version=\"1.0\" type=\"framework\">\n"
+        );
+        assert_eq!(
+            as_framework("<manifest version='8.0' type='device'>"),
+            "<manifest version='1.0' type='framework'>"
+        );
+    }
+
+    #[test]
+    fn a_description_written_for_a_newer_platform_is_read_as_the_oldest_version() {
+        // This is the one that stopped the boot: the description the
+        // recovery carries for se_omapi says it was written for a version
+        // the recovery's own reader does not know, and the reader then drops
+        // every description there is, so no service registers at all.
+        assert_eq!(
+            as_framework("<manifest version=\"9.0\" type=\"framework\">\n"),
+            "<manifest version=\"1.0\" type=\"framework\">\n"
+        );
+        assert_eq!(
+            as_framework("<manifest version='9.0' type='framework'>"),
+            "<manifest version='1.0' type='framework'>"
+        );
+    }
+
+    #[test]
+    fn a_description_that_already_names_the_oldest_version_is_left_as_it_is() {
+        for text in [
+            "<manifest version=\"1.0\" type=\"framework\"><hal/></manifest>\n",
+            "<manifest type=\"framework\"><hal/></manifest>\n",
+        ] {
+            assert!(as_framework(text) == text, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_the_version_of_the_description_itself_is_brought_down() {
+        let said = "<!-- version=\"9.0\" -->\n<manifest version=\"7.0\" type=\"framework\">\n    <hal version=\"4.0\"/>\n</manifest>\n";
+        let want = "<!-- version=\"9.0\" -->\n<manifest version=\"1.0\" type=\"framework\">\n    <hal version=\"4.0\"/>\n</manifest>\n";
+        assert_eq!(as_framework(said), want);
     }
 }

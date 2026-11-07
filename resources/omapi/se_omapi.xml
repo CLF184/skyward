@@ -2,7 +2,10 @@
     Input:
         external/se_omapi/se_omapi.xml
 -->
-<manifest version="9.0" type="framework">
+<!-- The version is the oldest one, not the one the input names: the
+     reader is the libvintf inside this recovery, and it drops every
+     description there is over one version it does not know. -->
+<manifest version="1.0" type="framework">
     <hal format="aidl">
         <name>android.se.omapi</name>
         <fqname>ISecureElementService/default</fqname>

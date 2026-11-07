@@ -238,6 +238,16 @@ not by init, so the stock `.rc` files' `disabled`/`enable` rules do not apply.
   second `spblob` bound to `secdis` beside the weaver-bound one, and the
   recovery opens that instead whenever it is there. **The decisions there are
   testable on a computer** — that module exists so that they are.
+- A service's **VINTF description has to name a version the recovery's own
+  `libvintf` knows**. `servicemanager` reads the whole folder and drops *every*
+  description over one it cannot parse, so a single description written for a
+  newer platform leaves the recovery with no manifest at all: nothing
+  registers — not keymint, not gatekeeper, not the weaver — and the only trace
+  is `-22 VINTF parse error: Illformed file: … Unrecognized manifest.version
+  9.0 (libvintf@8.0)` followed by `NULL VINTF MANIFEST!`. `as_framework` in
+  `crates/skyward/src/secure.rs` therefore writes `version="1.0"` on every
+  description it publishes, and `resources/omapi/se_omapi.xml` ships that
+  version rather than the one the AOSP input names.
 - What the phone kept beside its blobs goes to the kernel log. When a weaver
   binding is involved, look for
   `the blob the phone records is bound to a weaver; the blobs beside it are …`
