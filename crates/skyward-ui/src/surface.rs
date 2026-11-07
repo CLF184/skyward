@@ -109,7 +109,8 @@ impl SdeMode {
 }
 
 /// The block of parameters the display controller starts its subpixel
-/// renderer with, field for field as this phone's own recovery writes it.
+/// renderer with, field for field as the recovery that gets these pages' colours
+/// right writes it.
 ///
 /// The panel in a haotian is a pen tile one: red and blue dots sit on one
 /// diagonal grid and green dots between them, so the dots that carry a pixel's
@@ -120,15 +121,19 @@ impl SdeMode {
 /// which is why these pages came out with blue as magenta and red as near
 /// black while green, white and black looked right.
 ///
-/// The parameters are Qualcomm's driver's own, and the figures in them are
-/// this panel's: the pattern its dots repeat in (`cfg13`, every other dot of a
+/// The parameters are Qualcomm's driver's own, and the figures in them are the
+/// panel's: the pattern its dots repeat in (`cfg13`, every other dot of a
 /// line), the twelve bits a pixel's colour is spread over (`cfg15`), the taps
 /// of the filter that decides how much of a pixel each dot takes (`cfg16`,
-/// `cfg17`). A haotian's taps are not the ones the recovery falls back to for
-/// other phones -- its first and its thirteenth are the other way round, and
-/// the width of its dots' pattern (`cfg7`) is five rather than four -- and it
-/// chooses them by comparing `ro.boot.hardware.sku` with "haotian", which is
-/// what [`SprInit::for_panel`] repeats.
+/// `cfg17`).
+///
+/// The taps are the part that has to be right for this panel. The phone's own
+/// UI library carries two sets and picks between them by `ro.boot.hardware.sku`;
+/// the set it picks for a haotian weighs the red and the blue of a pixel alike,
+/// and on the glass that showed every saturated colour as the average of its
+/// red and blue -- the red of "wipe" and the orange of "reboot" both came out
+/// purple. The set written here is the other one, the one the TWRP recovery for
+/// these phones writes, which keeps the two apart.
 ///
 /// The `SDE_SPR_INIT_CFG_V2` property takes all of this; the first version of
 /// the property, which phones a generation older carry, takes the same block
@@ -186,9 +191,9 @@ const SPR_INIT_V2: usize = 0x130;
 
 #[cfg(any(target_os = "android", test))]
 impl SprInit {
-    /// The block this phone's own recovery hands the controller, chosen the
-    /// way the recovery chooses it.
-    fn for_panel(haotian: bool) -> SprInit {
+    /// The block to hand the controller: the one the TWRP recovery for these
+    /// phones writes, whose taps keep a pixel's red and blue apart.
+    fn for_panel() -> SprInit {
         SprInit {
             flags: 0,
             cfg0: 1,
@@ -198,7 +203,7 @@ impl SprInit {
             cfg4: 0,
             cfg5: 8,
             cfg6: 2,
-            cfg7: if haotian { 5 } else { 4 },
+            cfg7: 2,
             cfg8: 0,
             cfg9: 0,
             cfg10: 0,
@@ -210,12 +215,8 @@ impl SprInit {
                 0, 0x84, 0x108, 0x18c, 0x211, 0x295, 0x319, 0x39d, 0x421, 0x4a5, 0x529, 0x5ad, 0x632, 0x6b6, 0x73a, 0x7be, 0x842, 0x8c6, 0x94a,
                 0x9ce, 0xa53, 0xad7, 0xb5b, 0xbdf, 0xc63, 0xce7, 0xd6b, 0xdef, 0xe74, 0xef8, 0xf7c, 0xfff,
             ],
-            cfg16: [0, 256, 256, 0, 0, 256, 256, 0, 0, 256, 256, 0, 0, 256, 256, 0],
-            cfg17: if haotian {
-                [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-            } else {
-                [-2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-            },
+            cfg16: [128, 256, 128, 0, 86, 241, 164, 21, 52, 204, 204, 52, 21, 164, 241, 86],
+            cfg17: [-2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             cfg18_en: 0,
             cfg18: [0; 7],
             _pad: [0; 2],
@@ -290,49 +291,39 @@ mod tests {
     }
 
     #[test]
-    fn the_subpixel_renderer_is_told_the_layout_of_a_haotians_dots() {
-        // The block this phone's own recovery writes, byte for byte: the
-        // renderer left working, the dots' pattern every other one of a line,
-        // and the twelve bits a pixel spread over the dots that carry them.
-        let block = SprInit::for_panel(true);
+    fn the_subpixel_renderer_is_told_the_layout_of_the_panels_dots() {
+        // The block the recovery that gets the colours right writes, byte for
+        // byte: the renderer left working, the dots' pattern every other one of
+        // a line, and the twelve bits a pixel spread over the dots that carry
+        // them.
+        let block = SprInit::for_panel();
         let b = block.bytes();
         assert_eq!(b.len(), SPR_INIT_V2, "the block the current property takes");
         assert_eq!(&b[0x00..0x08], &[0; 8], "flags: the renderer works rather than stands aside");
         assert_eq!(&b[0x08..0x12], &[1, 0, 1, 0, 1, 0, 0, 0, 0, 0], "cfg0 to cfg4");
         assert_eq!(u16::from_le_bytes([b[0x12], b[0x13]]), 8, "cfg5");
         assert_eq!(u16::from_le_bytes([b[0x14], b[0x15]]), 2, "cfg6");
-        assert_eq!(u16::from_le_bytes([b[0x16], b[0x17]]), 5, "cfg7: a haotian's pattern is five dots wide");
+        assert_eq!(u16::from_le_bytes([b[0x16], b[0x17]]), 2, "cfg7: the width of the dots' pattern");
         assert_eq!(&b[0x20..0x28], &[1, 0, 0, 0, 1, 0, 0, 0], "cfg11");
         assert_eq!(&b[0x30..0x38], &[0x55, 0x01, 0x55, 0x01, 0x55, 0x01, 0, 0], "cfg13: every other dot");
         assert_eq!(&b[0x38..0x42], &[0, 0, 4, 0, 8, 0, 0xc, 0, 0x10, 0], "cfg14: where each channel starts");
         assert_eq!(&b[0x42..0x44], &[0, 0], "cfg15 starts at none of the bits");
         assert_eq!(&b[0x80..0x82], &[0xff, 0x0f], "cfg15 ends at all twelve of them");
-        assert_eq!(&b[0x84..0x88], &[0, 0, 0, 0], "cfg16");
-        assert_eq!(&b[0xc4..0xc8], &[0, 0, 0, 0], "cfg17: a haotian's first tap");
-        assert_eq!(&b[0xf4..0xfc], &[0xfe, 0xff, 0xff, 0xff, 2, 0, 0, 0], "cfg17: its thirteenth and fourteenth");
-        assert_eq!(&b[0x124..], &[0; 12], "nothing after cfg17 is asked for");
-    }
-
-    #[test]
-    fn the_taps_of_another_panel_are_the_ones_the_recovery_falls_back_to() {
-        // The recovery keys the taps on the phone's own name: a haotian's
-        // first and thirteenth are the other way round from another phone's,
-        // and its pattern is one dot wider. Nothing else in the block differs.
-        let haotian = SprInit::for_panel(true).bytes().to_vec();
-        let other = SprInit::for_panel(false).bytes().to_vec();
-        let differing: Vec<usize> = (0..haotian.len()).filter(|&i| haotian[i] != other[i]).collect();
         assert_eq!(
-            differing,
-            [0x16, 0xc4, 0xc5, 0xc6, 0xc7, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb],
-            "cfg7 and the taps of cfg17"
+            &b[0x84..0xa4],
+            &[0x80, 0, 0, 0, 0, 1, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x56, 0, 0, 0, 0xf1, 0, 0, 0, 0xa4, 0, 0, 0, 0x15, 0, 0, 0],
+            "cfg16: the taps of the filter, red and blue kept apart"
         );
+        assert_eq!(&b[0xc4..0xcc], &[0xfe, 0xff, 0xff, 0xff, 2, 0, 0, 0], "cfg17: the first taps");
+        assert_eq!(&b[0xf4..0xfc], &[2, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff], "cfg17: its thirteenth and fourteenth");
+        assert_eq!(&b[0x124..], &[0; 12], "nothing after cfg17 is asked for");
     }
 
     #[test]
     fn the_first_version_of_the_property_takes_the_block_without_its_tail() {
         // A driver from before the current property takes the same block
         // without the last two fields, which is exactly eight bytes shorter.
-        assert_eq!(SprInit::for_panel(true).bytes().len(), SPR_INIT_V2, "the block as the struct is");
+        assert_eq!(SprInit::for_panel().bytes().len(), SPR_INIT_V2, "the block as the struct is");
         assert_eq!(SPR_INIT_V2 - SPR_INIT_V1, 8, "the two fields the first version has not");
     }
 }
@@ -471,11 +462,6 @@ pub mod kms {
     /// renderer.
     fn subpixel_rendering() -> bool {
         skyward_sys::bool_prop("ro.boot.display_ap_spr", false)
-    }
-
-    /// Whether this phone is a haotian, whose panel's filter taps are its own.
-    fn haotian() -> bool {
-        skyward_sys::prop("ro.boot.hardware.sku").as_deref() == Some("haotian")
     }
 
     /// Built-in panel interfaces. Writeback and external outputs are never
@@ -812,14 +798,14 @@ pub mod kms {
             // A panel whose glass renders its own subpixels is driven with
             // the block that says how its dots are laid out; one whose glass
             // does not leaves that to the controller, and the controller is
-            // handed the block this phone's own recovery hands it. Left
+            // handed the block that keeps a pixel's red and blue apart. Left
             // unstarted the dots are lit as plain RGB -- red and blue dots
             // taking the same component -- which is the colour fault these
             // pages had. The bootloader knows which panel is here and says so.
             let mut spr = String::from("-");
             if let Some((prop, len)) = spr_property(&crtc_props) {
                 if subpixel_rendering() {
-                    let block = SprInit::for_panel(haotian());
+                    let block = SprInit::for_panel();
                     match card.create_property_blob(&block.bytes()[..len]) {
                         Ok(value) => {
                             req.add_property(crtc, prop, value);
