@@ -2481,6 +2481,7 @@ dependencies = [
  "skyward-info",
  "skyward-install",
  "skyward-net",
+ "skyward-sys",
  "skyward-vab",
  "svgtypes",
  "syn 2.0.119",

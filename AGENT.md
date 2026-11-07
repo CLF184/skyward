@@ -86,20 +86,59 @@ position, and skip anything the connector does not offer.
 Everything is set in `surface.rs::KmsSurface::open`. `SdeMode::find` reads the
 topology, DSC flag and rate out of the connector's `mode_properties` blob.
 
-### Known open problem: colours on the pages
+### The pages' colours: the panel's subpixels
 
-On `haotian` the pages still show blue as magenta and red as near black, and
-**this is not yet explained**. Every frame is wrong, from the very first one
-Skyward puts on the glass: the first photograph of the panel is already of a
-mangled picture, so no later flip, stale buffer or hand-over between two
-buffers can account for it. That first frame was also dumped on both sides of
-the hand-over, and the canvas and the scanout buffer are **byte for byte
-identical** — the buffer holds exactly the values the pages drew. The system's
-own screenshot — a readback of the framebuffer, not a photograph — is correct
-as well, so the values are right at least as far as the memory the display
-controller reads.
+The fault is the panel's subpixel layout, and it is answered by telling the
+display controller about it.
 
-What the glass then does with them was read off photographs of two pages. The
+The panel in `haotian` is described in its device tree as
+`xiaomi o2 42 02 0a cmd mode dsc dsi panel`, and it declares itself a pen tile
+one: `qcom,spr-pack-type = "pentile"` and
+`qcom,spr-pentile-pack-type = "BG-RG Type B"`. Its glass renders no subpixels
+of its own — red and blue dots sit on one diagonal grid with a green dot
+between each pair — so it is the display controller that spreads each pixel's
+colour over the dots that are really there. The bootloader says a panel like
+that is here in `ro.boot.display_ap_spr=1`, and the stock recovery's UI library
+reads exactly that: when it is set, it builds Qualcomm's
+`drm_msm_spr_init_cfg` and writes it as a property blob into the CRTC's
+`SDE_SPR_INIT_CFG_V2` (the `_V1` of an older driver) in the same commit that
+sets the mode. Skyward wrote no such block, so the controller ran its subpixel
+renderer without being told the layout, and the dots were lit as plain RGB: the
+red dots and the blue dots take the same component of the buffer, which is the
+`(R, G, B)` arriving as `(B, G, B)` rule measured off the photographs.
+
+`surface.rs` now writes the block. `SprInit` is the payload field for field and
+`SprInit::for_panel` picks the values the way the stock library does; the
+numbers were read back out of
+`target/v013-haotian/system/lib64/librecovery_ui.so`, whose builder is at
+0x376b0 for the second version of the property and at 0x37750 for the first.
+The block carries a `haotian`'s own tail as well — its first and thirteenth
+filter taps are the other way round and its dots' pattern is five wide rather
+than four, which the stock library decides by comparing
+`ro.boot.hardware.sku` with "haotian". `KmsSurface::open` sets the blob on the
+CRTC when the CRTC offers the property and `ro.boot.display_ap_spr` says the
+glass leaves the work to the controller: both are what the stock library gates
+on, so a phone whose panel renders its own subpixels is left alone.
+
+Whether it took is in the summary the surface writes to the kernel log once it
+is up: `... strips 2, dsc true, spr v2, crtc ...` says the block was written,
+`spr off` that the bootloader does not ask for one, `spr -` that the CRTC
+offers no such property — and the `SDE_SPR_INIT_CFG_V2` on the same line reads
+the blob's id instead of 0 once it is set. **The build that writes the block
+has not been photographed yet**: it was made after the last capture, so the
+glass has not been seen to change.
+
+What follows was measured while the fault was still unexplained, and is kept
+because it still holds: every frame was wrong from the very first one Skyward
+put on the glass, so no later flip, stale buffer or hand-over between two
+buffers accounts for it; the canvas and the scanout buffer were **byte for
+byte identical** at that hand-over; and the system's own screenshot — a
+readback of the framebuffer, not a photograph — was correct, so the values were
+right at least as far as the memory the display controller reads. A fault
+downstream of the buffer and upstream of the glass is what a subpixel layout
+the controller had not been told looks like.
+
+What the glass did with them was read off photographs of two pages. The
 rule that fits is this: the panel's red and its blue both take the buffer's
 blue byte, and its green takes the green one — `(R, G, B)` in the buffer
 arrives as `(B, G, B)`. That is why blue turns magenta, why red keeps only the
@@ -128,7 +167,11 @@ Ruled out, by measurement:
   `recovery_reg`. Skyward's dump and YARP's are identical word for word
   except in table RAM — the DSPP blocks, the blur LUT and the gamut blocks —
   and a handful of interface counters. Two captures of YARP's own running
-  recovery differ from each other by as much, in the same places.
+  recovery differ from each other by as much, in the same places. Its `spr_*`
+  sub-blocks are identical as well — 128 words each, first word `0x20010000`
+  — which is not what one would expect if the subpixel block were the
+  difference; either the dump does not read that block back live, or the two
+  recoveries end up in the same state there. That one is not settled.
 - **The DSI controller's registers, and the porch timings**, read the same way.
 - **The panel's DCS registers**, read back through
   `/proc/mi_display/mipi_rw_prim` and compared with YARP's; nothing in what
@@ -153,15 +196,15 @@ Tried, and none of it moved the colours:
 - Leaving `dsc_mode`, `bpp_mode` and `frame_trigger_mode` to the driver
   (`9148774`, reverted in `b7e94e4`).
 
-What has **not** been tried is the way Skyward presents. Skyward sets the panel
-up in its preferred mode and then switches it to 120 Hz; it draws into three
-dumb buffers in turn, and flips with a non-blocking commit that waits for the
-flip event. YARP sets the target mode in a single commit and blocks on it. None
-of that difference has been flashed and measured — a control build shaped like
-YARP was designed and never went on the phone. It is the last difference
-measurable from outside the panel that is left, and it is a difference in how
-the panel is driven rather than in what it is given, so it is where the next
-attempt should start.
+The one difference not tried is the way Skyward presents. Skyward sets the
+panel up in its preferred mode and then switches it to 120 Hz; it draws into
+three dumb buffers in turn, and flips with a non-blocking commit that waits for
+the flip event. YARP sets the target mode in a single commit and blocks on it.
+None of that has been flashed and measured — a control build shaped like YARP
+was designed and never went on the phone. It matters only if the subpixel block
+above turns out not to be the whole answer: a difference in how the panel is
+driven, rather than in what it is given, is then the last thing measurable from
+outside the panel and the next place to look.
 
 The evidence is in `target/color-debug/`: the canvas and scanout dumps
 (`frame-*`, `live-*`, `sw-*`, `canvas-new` and `scanout-new`), the DRM state
@@ -170,8 +213,12 @@ snapshots, `yarp-drm/` for YARP's side, `regs/regs-skyward`,
 `panel-skyward.txt` beside `panel-yarp.txt` for the DCS readbacks. The scripts
 that took them are `regs.sh` and `panel.sh` at the top of the tree, and
 `target/lutdiff.py` and `target/unpack_img.py` for reading the dumps back.
-None of it is committed — `target/` is a build directory — so it exists only
-on the machine that measured it.
+Reading the stock library's own block back out is `target/spr_scan.py` (which
+files of the two ramdisks carry the strings), `target/spr_xref.py` (where the
+code that reads a string is), `target/spr_dis.py` (a window disassembled) and
+`target/spr_dump.py` (a piece of the file as bytes and as text); it needs
+`capstone` for the disassembly. None of it is committed — `target/` is a build
+directory — so it exists only on the machine that measured it.
 
 ## The credential services
 
