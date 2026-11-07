@@ -99,7 +99,9 @@ static LISTENERS: OnceLock<Mutex<HashMap<String, Listening>>> = OnceLock::new();
 
 /// Give the service its listening sockets. Android's socket helper takes the
 /// first free descriptor at or above 50 and duplicates it there, so that is
-/// what the environment variable names.
+/// what the environment variable names. The duplicate is close-on-exec, so no
+/// other program the recovery starts is handed it; the one it is for clears it
+/// in its own child, just before the exec.
 fn listeners(s: &Service, known: &HashMap<String, u32>) -> Result<Vec<Listening>> {
     let kept = LISTENERS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut kept = kept.lock().expect("no panic while holding the service sockets");
@@ -136,7 +138,7 @@ fn listen(socket: &skyward_config::InitSocket, known: &HashMap<String, u32>) -> 
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let path = Path::new("/dev/socket").join(&socket.name);
     fs::create_dir_all("/dev/socket").context("make /dev/socket")?;
-    let address = unsafe { socket_address(&path) };
+    let address = socket_address(&path);
     if unsafe { libc::bind(fd.as_raw_fd(), (&address.0 as *const libc::sockaddr_un).cast(), address.1) } != 0 {
         return Err(io::Error::last_os_error()).with_context(|| format!("bind {}", path.display()));
     }
@@ -329,14 +331,39 @@ fn command(s: &Service, who: &Credentials, sockets: &[Listening]) -> Command {
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
     }
+    let mut handed: Vec<libc::c_int> = Vec::with_capacity(sockets.len());
     for socket in sockets {
-        cmd.env(format!("ANDROID_SOCKET_{}", socket.name), socket.fd.as_raw_fd().to_string());
+        let fd = socket.fd.as_raw_fd();
+        cmd.env(format!("ANDROID_SOCKET_{}", socket.name), fd.to_string());
+        handed.push(fd);
     }
     let who = who.clone();
     // Only system calls run between the fork and the exec, on what was
-    // worked out before it.
-    unsafe { cmd.pre_exec(move || who.take_on()) };
+    // worked out before it. The sockets were duplicated close-on-exec so
+    // that no program this recovery starts is given one it was not meant
+    // to have; the exec about to happen is the one they are for, so in the
+    // child alone they are cleared for it. Without that the descriptor the
+    // environment names is already closed when the program goes to look
+    // for it, and a program that cannot start without its listener, as
+    // Qualcomm's hlosminkdaemon cannot, ends at once and is started again
+    // every few seconds for as long as the recovery runs.
+    unsafe {
+        cmd.pre_exec(move || {
+            hand_over(&handed)?;
+            who.take_on()
+        })
+    };
     cmd
+}
+
+/// Let the descriptors survive the exec that follows, in the child alone.
+fn hand_over(fds: &[libc::c_int]) -> io::Result<()> {
+    for fd in fds {
+        if unsafe { libc::fcntl(*fd, libc::F_SETFD, 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Lock in memory every file the running programs have mapped or open on
@@ -453,5 +480,30 @@ fn wait_for(pid: u32) -> Result<()> {
         if e.kind() != io::ErrorKind::Interrupted {
             return Err(e).context("wait on the pidfd");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hand_over;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    /// The listener a program is given has to be open in the program: the
+    /// recovery duplicates it close-on-exec so that nothing else gets it, and
+    /// the child clears that for its own exec alone. Without the clearing the
+    /// number the environment names is closed by the time the program looks
+    /// for it, which is how a secure-world daemon ends at once and is started
+    /// again every few seconds.
+    #[test]
+    fn the_listener_a_program_is_given_is_open_in_it() {
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 50) };
+        assert!(fd >= 50, "the copy is at or above 50, where the environment names it");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(format!("test -e /proc/self/fd/{fd}"));
+        unsafe { cmd.pre_exec(move || hand_over(&[fd])) };
+        let status = cmd.status().expect("run sh");
+        assert!(status.success(), "the program finds the descriptor it was handed");
     }
 }

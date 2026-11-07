@@ -297,6 +297,15 @@ not by init, so the stock `.rc` files' `disabled`/`enable` rules do not apply.
   `crates/skyward/src/secure.rs` therefore writes `version="1.0"` on every
   description it publishes, and `resources/omapi/se_omapi.xml` ships that
   version rather than the one the AOSP input names.
+- A service started with **init's listening sockets** needs that descriptor to
+  reach the exec. `services.rs` duplicates each socket close-on-exec so that no
+  program the recovery starts is handed one it was not meant to have, and clears
+  it in the child's `pre_exec` alone, for the one exec it is for. Left
+  close-on-exec, `ANDROID_SOCKET_<name>` names a descriptor the program never
+  sees; a program that cannot start without its listener ends at once instead —
+  Qualcomm's `hlosminkdaemon` is one — and the kernel log shows
+  `… hlosminkdaemon: pid N ended: exit status: 0` every five seconds for as long
+  as the recovery runs.
 - What the phone kept beside its blobs goes to the kernel log. When a weaver
   binding is involved, look for
   `the blob the phone records is bound to a weaver; the blobs beside it are …`
