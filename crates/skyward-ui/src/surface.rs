@@ -69,21 +69,17 @@ struct SdeMode {
     /// Layer mixers in the mode's topology, each blending one vertical
     /// strip of the screen.
     mixers: u32,
+    /// Whether the picture is compressed over the link. The driver works the
+    /// rate out from the panel it was told about at boot, so this is read
+    /// only to say in the summary how the mode is driven.
     dsc: bool,
-    /// The DSC rate this mode is made for, as the connector's `bpp_mode`
-    /// property numbers it: 0 for 8 bits a pixel, 1 for 10, 2 for 12.
-    ///
-    /// A mode driven with a rate other than its own is decompressed with the
-    /// wrong arithmetic, and the panel shows the picture with its channels
-    /// mangled rather than its geometry wrong.
-    bpp: Option<u64>,
 }
 
 #[cfg(any(target_os = "android", test))]
 impl SdeMode {
     fn find(text: &str, name: &str) -> Result<SdeMode> {
         let mut current = false;
-        let (mut topology, mut bpp) = (None, None);
+        let mut topology = None;
         let mut dsc = false;
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
@@ -96,7 +92,6 @@ impl SdeMode {
                 match key {
                     "topology" => topology = Some(value),
                     "dsc_mode" => dsc = value == "1",
-                    "bpp_mode" => bpp = value.parse().ok(),
                     _ => {}
                 }
             }
@@ -109,7 +104,7 @@ impl SdeMode {
         } else {
             1
         };
-        Ok(SdeMode { mixers, dsc, bpp })
+        Ok(SdeMode { mixers, dsc })
     }
 }
 
@@ -247,24 +242,23 @@ mod tests {
 
     #[test]
     fn reads_the_topology_of_the_named_mode() {
-        assert_eq!(SdeMode::find(ISHTAR, "1440x3200x120cmd").unwrap(), SdeMode { mixers: 2, dsc: true, bpp: Some(2) });
-        assert_eq!(SdeMode::find(ISHTAR, "1080x2400x60cmd").unwrap(), SdeMode { mixers: 1, dsc: false, bpp: None });
+        assert_eq!(SdeMode::find(ISHTAR, "1440x3200x120cmd").unwrap(), SdeMode { mixers: 2, dsc: true });
+        assert_eq!(SdeMode::find(ISHTAR, "1080x2400x60cmd").unwrap(), SdeMode { mixers: 1, dsc: false });
         assert!(SdeMode::find(ISHTAR, "1440x3200x90cmd").is_err());
     }
 
     #[test]
-    fn the_rate_a_mode_is_compressed_at_is_read_beside_the_rest() {
-        // A haotian's own mode: two pipes, DSC on, compressed at 12 bits a
-        // pixel. Driven at 8 instead, the panel shows the picture with its
-        // colours mangled -- which is what this phone did until the rate was
-        // set from here.
+    fn a_mode_without_a_rate_or_a_variant_of_its_own_is_read_as_the_rest() {
+        // What the driver chose for the link is not read here: the phone's own
+        // recovery sets no connector property, and the rate the compressor
+        // runs at is the driver's own business. Only the topology and whether
+        // the mode is compressed are needed, and a mode that says nothing
+        // about either is taken as one mixer, uncompressed.
         let haotian = "mode_name=1440x3200x120cmd\nsubmode_idx=1\nbpp_mode=2\ndsc_mode=1\ntopology=sde_dualpipe_dscmerge\n";
         let mode = SdeMode::find(haotian, "1440x3200x120cmd").unwrap();
-        assert_eq!(mode.bpp, Some(2), "12 bits a pixel");
         assert!(mode.dsc && mode.mixers == 2);
-        // A mode that names no rate leaves it alone rather than guessing.
-        let bare = "mode_name=a\nbpp_mode=x\ndsc_mode=1\ntopology=sde_singlepipe\n";
-        assert_eq!(SdeMode::find(bare, "a").unwrap().bpp, None);
+        let bare = "mode_name=a\nbpp_mode=x\ntopology=sde_singlepipe\n";
+        assert_eq!(SdeMode::find(bare, "a").unwrap(), SdeMode { mixers: 1, dsc: false });
     }
 
     #[test]
@@ -458,30 +452,6 @@ pub mod kms {
         .ok_or_else(|| anyhow!("{} offers no {choice}", info.name().to_string_lossy()))
     }
 
-    /// The choice a plane's pixels are to be read as, and the property it
-    /// belongs to.
-    ///
-    /// A panel driven over DSI is usually described to the display controller
-    /// as YCbCr in the compressed sense -- the controller converts, the panel
-    /// decodes -- and a plane left at the driver's own default hands the
-    /// pixels over unconverted. What this phone's own recovery asks for is
-    /// BT.601 YCbCr, which is also what the kernel puts on a plane nobody has
-    /// spoken to, so that is what is asked for here.
-    fn colour_encoding(card: &Card, props: &Props) -> Option<(property::Handle, u64)> {
-        let (id, _) = props.get("COLOR_ENCODING").ok()?;
-        let choice = enum_choice(card, id, &["ITU-R BT.601 YCbCr", "BT601_YCC", "yuv444_8bit"], 0).ok()?;
-        Some((id, choice))
-    }
-
-    /// The choice of range a plane's pixels are to be read in, and the
-    /// property it belongs to: the limited one, as Android's own recovery
-    /// asks for, which is what a video range means to a panel.
-    fn colour_range(card: &Card, props: &Props) -> Option<(property::Handle, u64)> {
-        let (id, _) = props.get("COLOR_RANGE").ok()?;
-        let choice = enum_choice(card, id, &["YCbCr limited range", "Limited", "limited"], 1).ok()?;
-        Some((id, choice))
-    }
-
     /// The CRTC property the display controller's subpixel renderer is started
     /// through, and the length of the block that version of it takes: the
     /// current version where the driver has it, the first one otherwise.
@@ -506,35 +476,6 @@ pub mod kms {
     /// Whether this phone is a haotian, whose panel's filter taps are its own.
     fn haotian() -> bool {
         skyward_sys::prop("ro.boot.hardware.sku").as_deref() == Some("haotian")
-    }
-
-    /// The choice an enum property names `choice`, or the one sitting at
-    /// `index` among its choices where no choice is named that.
-    ///
-    /// Qualcomm's `bpp_mode` is an enumeration whose choices are numbered the
-    /// same way the mode description numbers its rate -- 0 for 8 bits a
-    /// pixel, 1 for 10, 2 for 12 -- but the names it gives them are the
-    /// driver's business. Looking the number up among the values covers both
-    /// a driver that names them and one that only numbers them.
-    fn enum_choice(card: &Card, id: property::Handle, choices: &[&str], index: u64) -> Result<u64> {
-        for choice in choices {
-            if let Ok(v) = enum_value(card, id, choice) {
-                return Ok(v);
-            }
-        }
-        let info = card.get_property(id).context("read property")?;
-        if let property::ValueType::Enum(e) = info.value_type() {
-            let (_, values) = e.values();
-            if let Some(v) = values.iter().find(|v| v.value() == index) {
-                return Ok(v.value());
-            }
-            // The enumeration is numbered from zero in the order it lists
-            // them where the values themselves are not the index.
-            if let Some(v) = values.get(index as usize) {
-                return Ok(v.value());
-            }
-        }
-        anyhow::bail!("{} offers nothing at {index}", info.name().to_string_lossy())
     }
 
     /// Built-in panel interfaces. Writeback and external outputs are never
@@ -761,7 +702,7 @@ pub mod kms {
                     let text = card.get_property_blob(blob).context("read mode_properties")?;
                     SdeMode::find(&String::from_utf8_lossy(&text), &mode.name().to_string_lossy())?
                 }
-                Err(_) => SdeMode { mixers: 1, dsc: false, bpp: None },
+                Err(_) => SdeMode { mixers: 1, dsc: false },
             };
             // One plane per layer mixer, each covering its own strip, which is
             // how this phone's own recovery drives the same mode: two planes,
@@ -828,33 +769,21 @@ pub mod kms {
             let blob = card.create_property_blob(&mode).context("create mode blob")?;
             let first = card.create_property_blob(preferred).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
-            // The mode is DSC-compressed: select its variant, as Android's
-            // compositor does, and give the compressor the rate the mode was
-            // made for. The rate is the panel's own: compressed at another
-            // one it is decompressed with the wrong arithmetic, and what
-            // reaches the glass is the picture with its colours mangled.
+            // The mode is DSC-compressed, and the compressor's rate and every
+            // other setting of the link is the driver's own: worked out at boot
+            // from the panel the device tree describes, which is the state the
+            // boot splash was drawn in. This phone's own recovery sets no
+            // connector property either -- only `MODE_ID`, `ACTIVE`, the
+            // plane's frame and rectangles, and the subpixel block below.
             //
-            // The connector numbers the rate as an enumeration, so the number
-            // the mode's description carries is looked up among the choices
-            // rather than written straight in, and a connector that does not
-            // offer it is left as it is.
+            // The experiments that forced the rate here are what the pages'
+            // colours are still paying for: with `bpp_mode` written from the
+            // mode's description and the DSC variant selected by hand, the
+            // panel is decompressed by arithmetic the phone may not have
+            // chosen. Leave the link as the driver left it.
             if layout.dsc {
                 let (id, _) = conn_props.get("dsc_mode")?;
                 req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
-                if let Some(bpp) = layout.bpp {
-                    if let Ok((id, _)) = conn_props.get("bpp_mode") {
-                        let choice = enum_choice(&card, id, &["bpp_8", "bpp_10", "bpp_12"], bpp);
-                        if let Ok(choice) = choice {
-                            req.add_property(conn.handle(), id, property::Value::UnsignedRange(choice));
-                        }
-                    }
-                }
-            }
-            // Frame starts are posted to the hardware: the driver's own
-            // default on display hardware of this generation, and Android's
-            // compositor sets the same.
-            if let Ok((id, _)) = conn_props.get("frame_trigger_mode") {
-                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "posted_start")?));
             }
             req.add_property(crtc, crtc_props.handle("MODE_ID")?, first);
             req.add_property(crtc, crtc_props.handle("ACTIVE")?, property::Value::Boolean(true));
@@ -878,17 +807,6 @@ pub mod kms {
                 req.add_property(*plane, props.handle("CRTC_Y")?, property::Value::SignedRange(0));
                 req.add_property(*plane, props.handle("CRTC_W")?, property::Value::UnsignedRange(strip as u64));
                 req.add_property(*plane, props.handle("CRTC_H")?, property::Value::UnsignedRange(h as u64));
-                // How the panel is told to read the pixels: this phone's own
-                // recovery drives it as ITU-R BT.601 YCbCr in its limited
-                // range, and a plane left at the driver's default is what
-                // showed blue as magenta. Said as the connector's own
-                // enumerations, and only where the connector offers them.
-                if let Some((what, choice)) = colour_encoding(&card, props) {
-                    req.add_property(*plane, what, property::Value::UnsignedRange(choice));
-                }
-                if let Some((what, choice)) = colour_range(&card, props) {
-                    req.add_property(*plane, what, property::Value::UnsignedRange(choice));
-                }
                 planes.push((*plane, fb_prop));
             }
             // A panel whose glass renders its own subpixels is driven with
@@ -958,13 +876,31 @@ pub mod kms {
                 ));
             }
             let crtc_props_now = Props::read(&card, crtc).context("read CRTC properties")?;
+            // The subpixel block as the driver holds it now: a blob id of zero
+            // means the write did not take at all, and the bytes say which of
+            // the two versions of the block the CRTC kept.
+            let kept = crtc_props_now.value("SDE_SPR_INIT_CFG_V2").ok().filter(|&id| id != 0);
+            let spr_kept = match kept.and_then(|id| card.get_property_blob(id).ok()) {
+                Some(bytes) => format!("{} bytes, starts {:02x?}", bytes.len(), &bytes[..bytes.len().min(8)]),
+                None => String::from("no blob"),
+            };
+            // What the link was left at: the driver's own choices, which the
+            // phone's own recovery leaves alone too. Read beside the block
+            // because a compressor rate the panel was not made for is read as
+            // the picture with its channels mangled.
+            let conn_props_now = Props::read(&card, conn.handle()).context("read connector properties")?;
+            let link = ["dsc_mode", "bpp_mode", "frame_trigger_mode"]
+                .iter()
+                .map(|n| format!("{n}={}", conn_props_now.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
+                .collect::<Vec<_>>()
+                .join(",");
             let crtc_colour = ["GAMMA_LUT", "DEGAMMA_LUT", "CTM", "COLOR_ENCODING", "COLOR_RANGE", "SDE_SPR_INIT_CFG_V2"]
                 .iter()
                 .map(|n| format!("{n}={}", crtc_props_now.value(n).map(|v| v.to_string()).unwrap_or_else(|_| "-".into())))
                 .collect::<Vec<_>>()
                 .join(",");
             let summary = format!(
-                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, spr {spr}, crtc {crtc_colour};{told}",
+                "{:?} connector {} mode {:?} {w}x{h} {} Hz, crtc {}, planes {ids:?} {:?}, strips {strips}, dsc {}, link {link}, spr {spr} ({spr_kept}), crtc {crtc_colour};{told}",
                 conn.interface(),
                 u32::from(conn.handle()),
                 mode.name(),
