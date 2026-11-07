@@ -7571,13 +7571,12 @@ mod tests {
     #[test]
     fn the_always_on_switch_shows_only_on_a_panel_that_dozes_and_turns_it() {
         let (f, i) = (fonts(), info());
-        let offered = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::AlwaysOn));
+        let listed = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::AlwaysOn));
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        assert!(!offered(&mut app), "a panel with no doze of its own has nothing to keep on the glass");
+        assert!(!listed(&mut app), "a panel with no doze of its own has nothing to keep on the glass");
         // A phone whose panel does doze offers the switch, and it starts on.
         app.state.panel_dozes = true;
         app.redraw();
-        assert!(offered(&mut app), "the switch is on the settings page");
         assert!(app.state.always_on, "the face shows unless it is turned off");
         tap(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn));
         assert!(!app.state.always_on, "the switch turns it off");

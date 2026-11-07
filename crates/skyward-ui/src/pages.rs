@@ -343,10 +343,20 @@ pub fn settings(cx: &Ctx) -> Frame {
     if let Some(r) = slider.below {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
+    y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["振动", "震動", "Vibration"]));
+    let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
+    let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
+    out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });
+    if let Some(r) = vibration.below {
+        out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
+    }
     // A phone whose panel has a doze of its own keeps a little on the glass
     // with the screen off; one whose panel has none shows nothing to offer.
+    // It sits under the vibration, so the settings above it stay where the
+    // pages have always put them.
+    let mut y = vibration.bottom;
     if s.panel_dozes {
-        y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["息屏显示", "螢幕關閉顯示", "Always-on display"]));
+        y = widgets::section(&mut c, t, f, y, l.pick(["息屏显示", "螢幕關閉顯示", "Always-on display"]));
         let on = Row::new(l.pick(ALWAYS_ON)).trail(Trail::Switch(s.always_on));
         let aod = widgets::list(&mut c, t, f, y, &[on]);
         out.extend(hits(&aod.rows, &[Action::Toggle(Switch::AlwaysOn)]));
@@ -357,14 +367,7 @@ pub fn settings(cx: &Ctx) -> Frame {
         ]);
         y = widgets::footnote(&mut c, t, f, aod.bottom, note);
     }
-    y = widgets::section(&mut c, t, f, y, l.pick(["振动", "震動", "Vibration"]));
-    let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
-    let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
-    out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });
-    if let Some(r) = vibration.below {
-        out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
-    }
-    y = widgets::section(&mut c, t, f, vibration.bottom, l.pick(["通用", "一般", "General"]));
+    y = widgets::section(&mut c, t, f, y, l.pick(["通用", "一般", "General"]));
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
