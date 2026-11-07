@@ -2260,8 +2260,10 @@ dependencies = [
  "skyward-sys",
  "skyward-ui",
  "skyward-vab",
+ "tempfile",
  "ureq",
  "zip 8.6.0",
+ "zstd",
 ]
 
 [[package]]
@@ -2369,6 +2371,7 @@ dependencies = [
  "x509-cert",
  "zerocopy",
  "zip 8.6.0",
+ "zstd",
 ]
 
 [[package]]
@@ -2473,6 +2476,8 @@ dependencies = [
  "libc",
  "png",
  "proc-macro2",
+ "serde",
+ "serde_json",
  "skyward-info",
  "skyward-install",
  "skyward-net",
