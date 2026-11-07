@@ -16,6 +16,9 @@ width = 1440
 height = 3200
 density = 600
 diagonal = 6.73
+# The radius a page's corners are rounded to as it slides in. Measured
+# against the glass: 168 and 384 were both too round, 96 too square, and 140
+# is what the stock settings round theirs to on this phone.
 corner_radius = 140
 
 [modules]
