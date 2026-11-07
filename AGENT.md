@@ -64,27 +64,24 @@ If a file has to outlive a start, it goes on persist as a small marker only.
 
 ## What the display needs on `haotian` (Xiaomi 15 Pro, sm8750)
 
-Found by comparing against YARP's live DRM state. The format and the planes are
-what both recoveries scan out. The properties under them were set to match
-YARP, and changing them did not move the colours at all — the open problem
-below says how that was measured.
+Found by comparing against YARP's live DRM state and against what the phone's
+own recovery writes. The format, the planes and the subpixel block below are
+what all three have in common. The connector's own settings are left to the
+driver: the phone's own recovery writes no connector property at all, and the
+driver works them out at boot from the panel the device tree describes, which
+is the state the boot splash is drawn in.
 
 | What | Value | Why |
 | --- | --- | --- |
 | Format | `XB24` (`Xbgr8888`), first in `SCANOUT` | what the phone's own recovery hands over |
 | Planes | one per layer mixer, 720 wide each | `sde_dualpipe_dscmerge` topology |
-| `bpp_mode` | `2` (12 bits a pixel), from `mode_properties` | the rate the mode's own description names |
-| `dsc_mode` | `dsc_enabled` | the mode is compressed |
-| `COLOR_ENCODING` | `ITU-R BT.601 YCbCr` | what both recoveries' state reads; the planes here expose no such property |
-| `COLOR_RANGE` | `YCbCr limited range` | same |
-
-`bpp_mode`, `COLOR_ENCODING` and `COLOR_RANGE` are **enumerations on the
-connector/plane**, whose choice names are the driver's business — set them
-through `enum_value`/`enum_choice`, which fall back to matching by value or
-position, and skip anything the connector does not offer.
+| `dsc_mode` | `dsc_enabled` | the mode is compressed; set through `enum_value`, skipped where the connector offers no such property |
+| `bpp_mode`, `frame_trigger_mode` | not set, the driver's own | the recovery whose colours are right sets neither |
+| `COLOR_ENCODING`, `COLOR_RANGE` | not set, the driver's own | same; the two writes were an experiment, and the plane state says the driver puts them there itself |
+| `SDE_SPR_INIT_CFG_V2` | the block `SprInit` makes | see below |
 
 Everything is set in `surface.rs::KmsSurface::open`. `SdeMode::find` reads the
-topology, DSC flag and rate out of the connector's `mode_properties` blob.
+topology and the DSC flag out of the connector's `mode_properties` blob.
 
 ### The pages' colours: the panel's subpixels
 
@@ -121,12 +118,25 @@ glass leaves the work to the controller: both are what the stock library gates
 on, so a phone whose panel renders its own subpixels is left alone.
 
 Whether it took is in the summary the surface writes to the kernel log once it
-is up: `... strips 2, dsc true, spr v2, crtc ...` says the block was written,
-`spr off` that the bootloader does not ask for one, `spr -` that the CRTC
-offers no such property — and the `SDE_SPR_INIT_CFG_V2` on the same line reads
-the blob's id instead of 0 once it is set. **The build that writes the block
-has not been photographed yet**: it was made after the last capture, so the
-glass has not been seen to change.
+is up: `... strips 2, dsc true, link dsc_mode=1,bpp_mode=…,frame_trigger_mode=…,
+spr v2 (304 bytes, starts [55, 01, …]), crtc …`. `spr v2` says the block was
+written (`v1` for the older property), `spr off` that the bootloader does not
+ask for one, `spr -` that the CRTC offers no such property; the bytes beside it
+are the block read back out of the CRTC, so `no blob` there means the write did
+not take even though it was asked for, and `link` says what the driver chose for
+the compressor and the tear signal.
+
+On the first build that wrote the block the magenta was gone — the pages stopped
+showing blue as magenta and red as near black — but the colours were still not
+what the phone's own recovery shows. So the block is part of the answer and not
+all of it. What has been ruled out since: the SDE register dumps cannot tell
+these builds apart (the `spr_*` sub-blocks are byte identical in Skyward's,
+YARP's and the writing build's captures, and YARP differs from itself between
+two captures by as much as it differs from Skyward), so the dump holds the
+bootloader's leftovers rather than what a blob writes. What was removed on the
+strength of it: the connector's `bpp_mode` and `frame_trigger_mode` writes and
+the plane's `COLOR_ENCODING`/`COLOR_RANGE` writes, none of which the phone's own
+recovery makes.
 
 What follows was measured while the fault was still unexplained, and is kept
 because it still holds: every frame was wrong from the very first one Skyward
@@ -169,9 +179,12 @@ Ruled out, by measurement:
   and a handful of interface counters. Two captures of YARP's own running
   recovery differ from each other by as much, in the same places. Its `spr_*`
   sub-blocks are identical as well — 128 words each, first word `0x20010000`
-  — which is not what one would expect if the subpixel block were the
-  difference; either the dump does not read that block back live, or the two
-  recoveries end up in the same state there. That one is not settled.
+  — and they are *still* identical in the build that writes the subpixel block,
+  so the dump is not reading back what a blob writes. It holds what the
+  bootloader's splash left there: the pattern word at `0x6a470`,
+  `0x15555555`, is three `0x155` groups, which is the register a block writes
+  only when its `cfg3` is non-zero, and Skyward's block carries `cfg3 = 0` and
+  would not touch it. Do not try to read the block out of this dump.
 - **The DSI controller's registers, and the porch timings**, read the same way.
 - **The panel's DCS registers**, read back through
   `/proc/mi_display/mipi_rw_prim` and compared with YARP's; nothing in what
@@ -196,6 +209,16 @@ Tried, and none of it moved the colours:
 - Leaving `dsc_mode`, `bpp_mode` and `frame_trigger_mode` to the driver
   (`9148774`, reverted in `b7e94e4`).
 
+Moved them:
+
+- **The subpixel block** (`c965c23`). The first build to write it lost the
+  magenta and the near-black red in one go, which is why the block is the answer
+  to the original fault. What is left over is a different question.
+- The connector's `bpp_mode` and `frame_trigger_mode` writes and the plane's
+  `COLOR_ENCODING`/`COLOR_RANGE` writes are now gone as well, on the strength of
+  the phone's own recovery making none of them. Whether that moves the colours
+  is the open measurement.
+
 The one difference not tried is the way Skyward presents. Skyward sets the
 panel up in its preferred mode and then switches it to 120 Hz; it draws into
 three dumb buffers in turn, and flips with a non-blocking commit that waits for
@@ -217,8 +240,13 @@ Reading the stock library's own block back out is `target/spr_scan.py` (which
 files of the two ramdisks carry the strings), `target/spr_xref.py` (where the
 code that reads a string is), `target/spr_dis.py` (a window disassembled) and
 `target/spr_dump.py` (a piece of the file as bytes and as text); it needs
-`capstone` for the disassembly. None of it is committed — `target/` is a build
-directory — so it exists only on the machine that measured it.
+`capstone` for the disassembly. `target/propnames.py` and
+`target/propnames2.py` list every property name the two UI libraries contain at
+all — the shortest way to see what the phone's own recovery does and does not
+write — `target/dexnames.py` prints every capitalised identifier in the stock
+library, `target/blocks.py` and `target/regdiff.py` read and compare register
+dumps. None of it is committed — `target/` is a build directory — so it exists
+only on the machine that measured it.
 
 ## The credential services
 
