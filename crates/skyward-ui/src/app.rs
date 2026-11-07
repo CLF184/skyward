@@ -7571,16 +7571,19 @@ mod tests {
     #[test]
     fn the_always_on_switch_shows_only_on_a_panel_that_dozes_and_turns_it() {
         let (f, i) = (fonts(), info());
-        let listed = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::AlwaysOn));
         let mut app = App::new(Screen::Settings, W, H, PPD);
-        assert!(!listed(&mut app), "a panel with no doze of its own has nothing to keep on the glass");
+        assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::AlwaysOn)), "a panel with no doze of its own has nothing to keep on the glass");
         // A phone whose panel does doze offers the switch, and it starts on.
         app.state.panel_dozes = true;
         app.redraw();
         assert!(app.state.always_on, "the face shows unless it is turned off");
-        tap(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn));
+        let (_, y) = spot(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn));
+        if y > H as f32 * 0.9 {
+            scroll_to(&mut app, &f, y - H as f32 * 0.8, 0);
+        }
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn), 1000).len(), 0, "no work goes with it");
         assert!(!app.state.always_on, "the switch turns it off");
-        tap(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn));
+        tap_at(&mut app, &f, &i, Action::Toggle(Switch::AlwaysOn), 3000);
         assert!(app.state.always_on, "and on again");
     }
 
