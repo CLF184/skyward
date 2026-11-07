@@ -1104,6 +1104,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0, mono)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
+    // What the display was told is worth having in the kernel log even when
+    // the pages come up: it says which subpixel block, if any, went out.
+    let _ = skyward_sys::kmsg(&format!("the display is {}", surface.describe()));
     let (w, h) = surface.size();
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
