@@ -1144,7 +1144,9 @@ mod tests {
     fn a_doze_names_its_command_sets_both_ways() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
         let aod = cfg.aod.expect("haotian dozes with the panel's own command sets");
-        assert_eq!((aod.enter_cmds, aod.leave_cmds), (vec![45], vec![18]));
+        assert_eq!((aod.enter_cmds, aod.leave_cmds), (vec![44], vec![18]), "the high-brightness doze in, the way out");
+        assert_eq!(aod.enter.len(), 1, "the driver's doze brightness is set before the panel dozes");
+        assert_eq!((aod.enter[0].id, aod.enter[0].value.as_str()), (3, "1"));
         assert_eq!(aod.node, "/proc/mi_display/tx_cmd_set_prim");
         let base = include_str!("../../../devices/ishtar.toml");
         assert!(DeviceConfig::parse(base).unwrap().aod.is_none(), "a phone that names none blanks the ordinary way");

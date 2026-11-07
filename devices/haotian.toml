@@ -247,13 +247,21 @@ firmware = [
 ]
 strength = { lightest = 0.25, strongest = 0.75 }
 
-# The panel's own doze, as the system's always-on display uses it. Tried by
-# hand in the recovery: command set 45 (mi,mdss-dsi-doze-lbm-command) keeps
-# the frame on the glass, dimmed, with the backlight written to 0; set 18
-# (qcom,mdss-dsi-nolp-command) brings the panel back, and the backlight is
-# written again after it.
+# The panel's own doze, as the system's always-on display uses it, tried by
+# hand in the recovery.
+#
+# The way in is command set 44 (mi,mdss-dsi-doze-hbm-command) rather than 45
+# (mi,mdss-dsi-doze-lbm-command): the panel's device tree drives the low one
+# at DBV 35 and the high one at DBV 412, and at 35 the face on the glass can
+# be seen only in the dark. Both keep the frame up with the backlight written
+# to 0, and set 18 (qcom,mdss-dsi-nolp-command) brings the panel back, the
+# backlight being written again after it.
+#
+# 1 goes to the driver's doze-brightness feature before the panel dozes: it
+# has two levels, and the driver calls 1 `doze_brightness_high`.
 [aod]
-enter_cmds = [45]
+enter = [{ id = 3, value = "1" }]
+enter_cmds = [44]
 leave_cmds = [18]
 
 # The recovery's own logd loads libsysutils and libcap, which the stock
