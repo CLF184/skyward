@@ -109,10 +109,14 @@ impl Panel {
 
     /// Send one command set to the panel, waiting out a driver that is still
     /// busy with the frame it was just handed rather than giving up on it.
+    ///
+    /// The number goes with a newline after it, as a shell's `echo` writes
+    /// it: the driver reads the node a line at a time, and a write that ends
+    /// without one is answered EAGAIN and dropped, measured on haotian.
     fn send(&self, cmd: u32) -> std::io::Result<()> {
         let mut left = SEND_ATTEMPTS;
         loop {
-            match fs::write(&self.node, cmd.to_string()) {
+            match fs::write(&self.node, format!("{cmd}\n")) {
                 Ok(()) => return Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && left > 1 => {
                     left -= 1;
