@@ -105,17 +105,24 @@ red dots and the blue dots take the same component of the buffer, which is the
 `(R, G, B)` arriving as `(B, G, B)` rule measured off the photographs.
 
 `surface.rs` now writes the block. `SprInit` is the payload field for field and
-`SprInit::for_panel` picks the values the way the stock library does; the
-numbers were read back out of
-`target/v013-haotian/system/lib64/librecovery_ui.so`, whose builder is at
-0x376b0 for the second version of the property and at 0x37750 for the first.
-The block carries a `haotian`'s own tail as well — its first and thirteenth
-filter taps are the other way round and its dots' pattern is five wide rather
-than four, which the stock library decides by comparing
-`ro.boot.hardware.sku` with "haotian". `KmsSurface::open` sets the blob on the
-CRTC when the CRTC offers the property and `ro.boot.display_ap_spr` says the
-glass leaves the work to the controller: both are what the stock library gates
-on, so a phone whose panel renders its own subpixels is left alone.
+`SprInit::for_panel` supplies the values. The numbers were read back out of two
+libraries: the stock recovery's own
+(`target/v013-haotian/system/lib64/librecovery_ui.so`, whose builder is at
+0x376b0 for the second version of the property and at 0x37750 for the first) and
+the TWRP recovery for these phones
+(`target/yarp-root/system/lib64/libtwrpminui.so`, whose builder is at 0x237f8).
+Both build the same struct and every table either of them uses is byte identical,
+but they pick different filter taps. The stock library keys the taps on
+`ro.boot.hardware.sku` and, for `haotian`, takes the set that weighs a pixel's
+red and blue alike (`cfg16` = `[0, 256, 256, 0]` four times, `cfg7` = 5). TWRP
+keys them on nothing and takes the set that keeps the two apart
+(`cfg16` = `[128, 256, 128, 0, 86, 241, 164, 21, 52, 204, 204, 52, 21, 164, 241,
+86]`, `cfg17` = `[-2, 2, …, 2, -2, …]`, `cfg7` = 2). The block written here is
+TWRP's, because TWRP's colours are the ones that are right on this panel.
+`KmsSurface::open` sets the blob on the CRTC when the CRTC offers the property and
+`ro.boot.display_ap_spr` says the glass leaves the work to the controller: both
+are what the two libraries gate on, so a phone whose panel renders its own
+subpixels is left alone.
 
 Whether it took is in the summary the surface writes to the kernel log once it
 is up: `... strips 2, dsc true, link dsc_mode=1,bpp_mode=…,frame_trigger_mode=…,
@@ -129,7 +136,13 @@ the compressor and the tear signal.
 On the first build that wrote the block the magenta was gone — the pages stopped
 showing blue as magenta and red as near black — but the colours were still not
 what the phone's own recovery shows. So the block is part of the answer and not
-all of it. What has been ruled out since: the SDE register dumps cannot tell
+all of it. Photographs of the menu page on that build say what the block did:
+every saturated colour came out as the average of its red and its blue, which is
+what the stock library's `haotian` taps do — the red "wipe" icon (242, 83, 75)
+and the orange "reboot" icon (255, 146, 47) both showed as purple, while green,
+grey, white and black came through. The taps written now are TWRP's, which keep
+the two apart.
+What has been ruled out since: the SDE register dumps cannot tell
 these builds apart (the `spr_*` sub-blocks are byte identical in Skyward's,
 YARP's and the writing build's captures, and YARP differs from itself between
 two captures by as much as it differs from Skyward), so the dump holds the
@@ -214,6 +227,10 @@ Moved them:
 - **The subpixel block** (`c965c23`). The first build to write it lost the
   magenta and the near-black red in one go, which is why the block is the answer
   to the original fault. What is left over is a different question.
+- **The filter taps inside that block.** The first build carried the stock
+  library's `haotian` taps, which weigh a pixel's red and blue alike; the build
+  after it carries TWRP's, which keep them apart. Whether that is the whole of
+  the remaining fault is the open measurement.
 - The connector's `bpp_mode` and `frame_trigger_mode` writes and the plane's
   `COLOR_ENCODING`/`COLOR_RANGE` writes are now gone as well, on the strength of
   the phone's own recovery making none of them. Whether that moves the colours
