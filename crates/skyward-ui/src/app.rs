@@ -1880,6 +1880,37 @@ pub enum Touch {
     Up,
 }
 
+/// A tap on the dark panel, as the touchscreen reports it while nothing else
+/// is to be done with the finger: the phone's own system lights its screen
+/// on two of them, so the recovery does too.
+///
+/// A tap is not a touch: what is counted here is only what a finger does to
+/// a panel that is off, so the gesture that lights the panel works nothing
+/// on the page under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tap {
+    /// Where the finger came down, in the same units as [`Touch`].
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Tap {
+    /// How long after a tap another may come and still be the second of a
+    /// double tap: Android's own window.
+    pub const WINDOW_MS: u64 = 300;
+    /// How far apart two taps of one double tap may land, as a share of the
+    /// screen's width: the slop the phone's own system uses. A tap is in
+    /// screen pixels, so this is measured against the width the pages are
+    /// laid out in.
+    pub const SLOP: f32 = 0.08;
+    /// Whether `other` lands near enough to be the second tap of one double
+    /// tap started by this, on a screen `w` pixels wide.
+    pub fn doubles(&self, other: &Tap, w: f32) -> bool {
+        let slop = Self::SLOP * w;
+        (other.x - self.x).abs() <= slop && (other.y - self.y).abs() <= slop
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Power,
@@ -2615,6 +2646,9 @@ pub struct App {
     /// When the panel last lit from dark, for the brief guard that keeps a
     /// stray touch or key from acting on a page just put up.
     woke_at: Option<u64>,
+    /// The last tap on a dark panel and when it came, for the second tap of
+    /// a double tap to find.
+    tapped: Option<(Tap, u64)>,
     /// The panel at full brightness, or easing to the dim level it takes
     /// shortly before going off.
     bright: Fade,
@@ -2710,6 +2744,7 @@ impl App {
             display_on: true,
             active: None,
             woke_at: None,
+            tapped: None,
             bright: full_brightness(),
             curtain: Fade::shown(BRIGHTEN, DARKEN),
             darkening: None,
@@ -3070,7 +3105,22 @@ impl App {
             self.curtain.set(true, now);
         }
         self.woke_at = Some(now);
+        self.tapped = None;
         self.stir(now);
+    }
+
+    /// A finger came down on the dark panel: the second of two taps that land
+    /// near each other, soon enough, lights it, as the phone's own double tap
+    /// does. One that comes later than the window is a tap of its own and
+    /// starts the count again.
+    fn tap(&mut self, now: u64, x: f32, y: f32) {
+        let tap = Tap { x, y };
+        let doubled =
+            self.tapped.filter(|(first, at)| now.saturating_sub(*at) <= Tap::WINDOW_MS && first.doubles(&tap, self.w as f32));
+        match doubled {
+            Some(_) => self.wake(now),
+            None => self.tapped = Some((tap, now)),
+        }
     }
 
     /// A charger or a computer was attached, `cable_in`, or taken away: the
@@ -5860,9 +5910,14 @@ impl App {
     }
 
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
-        // A finger on the dark panel lights nothing, as on the phone's own
-        // system, where the power key lights it.
+        // A finger on the dark panel lights nothing by itself, as on the
+        // phone's own system, where the power key lights it - except that a
+        // second tap where the first one landed lights it, which is that
+        // system's own double tap. Neither tap works anything on the page.
         if !self.display_on {
+            if let Touch::Down(x, y) = ev {
+                self.tap(now, x, y);
+            }
             return Vec::new();
         }
         // A finger on the charging screen sends it away for the page, and
@@ -11177,16 +11232,69 @@ mod tests {
         let mut app = App::new(Screen::Home, W, H, PPD);
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
         press(&mut app, Key::Power, 0);
+        // One tap alone is not the second of a double tap, so the panel stays
+        // dark and the page under it is not worked.
         assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
         assert!(app.touch(Touch::Move(x, y - 300.0), &f, 120).is_empty());
         assert!(app.touch(Touch::Up, &f, 140).is_empty());
         assert!(!app.display_on(), "the panel stays dark");
         assert_eq!(app.screen(), Screen::Home, "the tap pressed nothing");
         assert_eq!(app.top().1, 0.0, "nor scrolled the page");
-        press(&mut app, Key::Power, 200);
+        // A tap far from the first is a tap of its own.
+        assert!(app.touch(Touch::Down(x + W as f32 * 0.5, y), &f, 200).is_empty());
+        assert!(app.touch(Touch::Up, &f, 220).is_empty());
+        assert!(!app.display_on(), "a tap elsewhere is not the second of a double tap");
+        press(&mut app, Key::Power, 400);
         assert!(app.display_on());
         tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 700);
         assert_eq!(app.screen(), Screen::Settings, "a tap on the lit panel does");
+    }
+
+    /// Two taps on the dark panel light it, as the phone's own system's double
+    /// tap does, and neither tap works the page: they are one gesture that
+    /// lights the panel.
+    #[test]
+    fn two_taps_on_the_dark_panel_light_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
+        press(&mut app, Key::Power, 0);
+        for (at, lit) in [(100, false), (200, true)] {
+            app.touch(Touch::Down(x, y), &f, at);
+            app.touch(Touch::Up, &f, at + 20);
+            assert_eq!(app.display_on(), lit, "after the tap at {at} ms");
+        }
+        assert_eq!(app.screen(), Screen::Home, "the taps pressed nothing: they lit the panel");
+        assert_eq!(app.panel(320), Some(SLIDER_START), "and the panel comes up at full brightness");
+        // The next tap is on a lit panel, and works the page.
+        app.touch(Touch::Down(x, y), &f, 400);
+        app.touch(Touch::Up, &f, 420);
+        assert_eq!(app.screen(), Screen::Settings);
+    }
+
+    /// The two taps of one double tap are close together on the glass and
+    /// inside Android's own window; anything else is a tap of its own, and the
+    /// panel stays dark.
+    #[test]
+    fn taps_too_far_apart_or_too_late_do_not_light_the_panel() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
+        press(&mut app, Key::Power, 0);
+        // Too late: the window the first tap opened has gone by.
+        app.touch(Touch::Down(x, y), &f, 100);
+        app.touch(Touch::Up, &f, 120);
+        app.touch(Touch::Down(x, y), &f, 100 + Tap::WINDOW_MS + 50);
+        app.touch(Touch::Up, &f, 100 + Tap::WINDOW_MS + 70);
+        assert!(!app.display_on(), "a tap past the window starts a count of its own");
+        // Too far: the tap after it lands elsewhere on the glass.
+        let far = W as f32 * (Tap::SLOP + 0.05);        app.touch(Touch::Down(x + far, y), &f, 100 + Tap::WINDOW_MS + 100);
+        app.touch(Touch::Up, &f, 100 + Tap::WINDOW_MS + 120);
+        assert!(!app.display_on(), "a tap far from the last is not its pair");
+        // The two that are both soon and close do light it.
+        app.touch(Touch::Down(x + far, y), &f, 100 + Tap::WINDOW_MS + 150);
+        app.touch(Touch::Up, &f, 100 + Tap::WINDOW_MS + 170);
+        assert!(app.display_on());
     }
 
     #[test]

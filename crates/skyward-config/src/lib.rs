@@ -391,6 +391,13 @@ pub struct Touch {
     /// step of starting the controller.
     #[serde(default)]
     pub writes: Vec<Write>,
+    /// Whether two taps on the dark panel light it, as the phone's own
+    /// system's double tap does. A phone whose panel goes dark but whose
+    /// controller keeps reporting taps is one this is worth setting on: the
+    /// recovery then keeps the phone awake while the panel is off, since a
+    /// suspended phone is one the touchscreen cannot report a tap to.
+    #[serde(default)]
+    pub double_tap: bool,
 }
 
 /// Partitions as the phone itself mounts them.
@@ -860,6 +867,7 @@ mod tests {
             [Write { path: "/sys/class/touch/touch_dev/enable_touch_raw".into(), value: "0".into() }],
             "its controller reports positions itself"
         );
+        assert!(!cfg.touch.double_tap, "this phone is left as it was: the power key lights its panel");
         assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into() }));
         assert_eq!(cfg.partitions.mounted, ["persist"], "the secure world keeps its own files there");
         let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
@@ -1196,5 +1204,25 @@ mod tests {
         assert!(DeviceConfig::parse(&format!("{base}\n[aod]\nleave_cmds = [18]\n")).is_err(), "no way in");
         let relative = format!("{base}\n[aod]\nnode = \"proc/x\"\nenter_cmds = [45]\nleave_cmds = [18]\n");
         assert!(DeviceConfig::parse(&relative).is_err());
+    }
+
+    /// haotian's panel lights on two taps, as the phone's own system's does;
+    /// no other phone is given that, since a phone whose controller stops
+    /// reporting fingers with its panel off has nothing for it to work with.
+    #[test]
+    fn the_phone_whose_panel_lights_on_two_taps_names_it() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        assert!(cfg.touch.double_tap, "two taps on its dark panel light it");
+        for other in ["nezha", "ishtar", "fuxi", "nuwa"] {
+            let text = std::fs::read_to_string(format!("devices/{other}.toml"));
+            let Ok(text) = text else { continue };
+            let cfg = DeviceConfig::parse(&text).unwrap();
+            assert!(!cfg.touch.double_tap, "{other} was left as it was: its power key lights the panel");
+        }
+        // A phone that names nothing lights only by its power key.
+        let none = format!("{base}\n", base = include_str!("../../../devices/ishtar.toml"));
+        assert!(!DeviceConfig::parse(&none).unwrap().touch.double_tap);
+        let set = format!("{none}\n[touch.double_tap]\n");
+        assert!(DeviceConfig::parse(&set).is_err(), "the flag is a word of [touch], not a table of its own");
     }
 }

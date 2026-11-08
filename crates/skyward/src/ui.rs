@@ -1606,6 +1606,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // a command running in the terminal, a network being joined, the
         // battery read after a uevent, or a computer on the USB port, whose
         // adb and file transfer stay up.
+        //
+        // A phone whose panel lights on a double tap is awake for it too: a
+        // suspended phone is one the touchscreen cannot report a tap to, so
+        // sleeping would leave the panel lit only by the power key again.
         let busy = installer.is_some()
             || eraser.is_some()
             || worker.is_some()
@@ -1630,6 +1634,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             && leave_at.is_none()
             && !joining
             && !running
+            && !cfg.touch.double_tap
             && asked.is_none()
             && usb_link()? != UsbLink::Connected;
         sleeper.allow(may_sleep);

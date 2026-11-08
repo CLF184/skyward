@@ -42,6 +42,12 @@ load = ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]
 # controller and not yet tried on this phone's.
 [touch]
 writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
+# Two taps on the dark panel light it again, as the phone's own system's
+# double tap does. Its controller keeps reporting fingers while the panel is
+# off, so the taps arrive; a suspended phone is one they cannot arrive at,
+# which is why the recovery then stays awake with the panel off - that is
+# the price of lighting it without the power key.
+double_tap = true
 
 # The node the phone's own init opens to every program as it boots, which a
 # recovery leaves the owner's alone. The touch layer writes positions through
