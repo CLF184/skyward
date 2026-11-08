@@ -127,10 +127,16 @@ user = "root"
 groups = ["system"]
 
 # 5. 安全元件服务
-# The phone's secure element is Qualcomm's, run as system in nfc and system,
-# and it registers one service for each of SIM1, SIM2 and eSE1. There is no
-# Goodix one on this build, and no description file of the name the earlier
-# configuration named. libEseUtils is in the hw folder, as gatekeeper's is.
+# The phone's secure element is Qualcomm's, and it registers one service for
+# each of SIM1, SIM2 and eSE1. There is no Goodix one on this build, and no
+# description file of the name the earlier configuration named. libEseUtils
+# is in the hw folder, as gatekeeper's is.
+#
+# Root, where the stock rc says system: the HAL asks the element for its
+# vendor id before it can open the TA, and that answer comes back through
+# the ADSP the recovery boots once its modules are in. YARP runs it as root
+# on this phone, and the service the Thales weaver reaches its element
+# through is this one.
 [[service]]
 path = "/vendor/bin/hw/android.hardware.secure_element-service.qti"
 libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
@@ -139,8 +145,8 @@ registers = [
     "android.hardware.secure_element.ISecureElement/SIM1",
     "android.hardware.secure_element.ISecureElement/SIM2",
 ]
-user = "system"
-groups = ["nfc", "system"]
+user = "root"
+groups = ["root", "nfc"]
 
 # 5b. OMAPI
 # The Thales weaver reaches the secure element through
