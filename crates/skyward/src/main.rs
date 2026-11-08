@@ -666,17 +666,26 @@ const FIRMWARE_SHOWN: &str = "/firmware";
 #[cfg(target_os = "android")]
 const REMOTEPROC: &str = "/sys/class/remoteproc";
 
-/// How long the DSP may take to say it is running once its firmware is in.
+/// How long the DSP is given to say it is running once its firmware is in.
+///
+/// Short on purpose. The kernel starts the DSP while the modules load, so a
+/// phone whose firmware it can read says running within a second. A phone
+/// whose firmware it cannot read - /vendor/firmware for the DSP is one
+/// segment short on some builds, and the loader then stops with
+/// "can't start rproc ...: -2" - never says it, and waiting longer only
+/// delays the pages: the weaver answers on such a phone with the DSP still
+/// offline, so the DSP is worth a moment and no more.
 #[cfg(target_os = "android")]
-const ADSP_READY: std::time::Duration = std::time::Duration::from_secs(60);
+const ADSP_READY: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Wait until the kernel says the ADSP is running. The secure element's HAL
-/// reaches the element through it, so nothing that uses the element — the
-/// weaver included — can be started before. The kernel's remoteproc probe
-/// loads the DSP's firmware and boots it while init is still running, so
-/// this only observes: writing the boot or SSR switch of a DSP that is
-/// already running asks for a restart, and on this phone the SSR write
-/// blocks in the ADSP driver's shutdown path until the DSP is gone.
+/// Give the ADSP a moment to say the kernel started it. The secure element's
+/// HAL asks it for the element's vendor id, so a phone whose DSP is coming up
+/// is worth waiting for; one whose DSP will not come up at all still has to
+/// show its pages. The kernel's remoteproc probe loads the DSP's firmware and
+/// boots it while init is still running, so this only observes: writing the
+/// boot or SSR switch of a DSP that is already running asks for a restart,
+/// and on this phone the SSR write blocks in the ADSP driver's shutdown path
+/// until the DSP is gone.
 #[cfg(target_os = "android")]
 fn wait_for_adsp() -> Result<()> {
     let asked = std::time::Instant::now();
