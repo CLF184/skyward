@@ -11565,7 +11565,9 @@ mod tests {
         assert!(!app.display_on(), "a tap elsewhere is not the second of a double tap");
         press(&mut app, Key::Power, 400);
         assert!(app.display_on());
-        tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 700);
+        // Past the guard that keeps a stray touch just after the panel lit
+        // from acting, the same tap works the page.
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 400 + WAKE_GUARD_MS + 10);
         assert_eq!(app.screen(), Screen::Settings, "a tap on the lit panel does");
     }
 
@@ -11585,9 +11587,11 @@ mod tests {
         }
         assert_eq!(app.screen(), Screen::Home, "the taps pressed nothing: they lit the panel");
         assert_eq!(app.panel(320), Some(SLIDER_START), "and the panel comes up at full brightness");
-        // The next tap is on a lit panel, and works the page.
-        app.touch(Touch::Down(x, y), &f, 400);
-        app.touch(Touch::Up, &f, 420);
+        // The next tap, past the guard that keeps a touch just after the panel
+        // lit from acting, works the page.
+        let after = 200 + WAKE_GUARD_MS + 10;
+        app.touch(Touch::Down(x, y), &f, after);
+        app.touch(Touch::Up, &f, after + 20);
         assert_eq!(app.screen(), Screen::Settings);
     }
 
