@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use cpio::{NewcBuilder, NewcReader};
 use std::io::{Cursor, Read, Write};
-use std::process::{Command, Stdio};
 
 /// One cpio entry with the metadata the kernel restores when it unpacks the
 /// archive into rootfs.
@@ -159,22 +158,26 @@ fn root_entry(name: &str, mode: u32, data: Vec<u8>) -> Entry {
     Entry { name: name.to_string(), mode, uid: 0, gid: 0, mtime: 0, nlink, dev: (0, 0), rdev: (0, 0), data }
 }
 
+/// The magic of LZ4's legacy framing, which is the framing Android's boot
+/// ramdisks carry: the same number `lz4 -l` writes, little-endian.
+const LEGACY_MAGIC: u32 = 0x184C_2102;
+
+/// What the reference tool compresses into one legacy block: eight mebibytes.
+/// The kernel's initramfs unpacker hands the decoder a buffer that size, so no
+/// block may stand for more.
+const LEGACY_BLOCK: usize = 8 * 1024 * 1024;
+
 fn lz4_legacy(input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = Command::new("lz4")
-        .args(["-l", "-12", "--favor-decSpeed", "-c"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .context("run lz4 (install it, e.g. `brew install lz4`)")?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
-    let input = input.to_vec();
-    let writer = std::thread::spawn(move || stdin.write_all(&input));
-    let out = child.wait_with_output().context("lz4")?;
-    writer.join().expect("lz4 writer thread").context("feed lz4")?;
-    if !out.status.success() {
-        bail!("lz4 exited with {}", out.status);
+    let mut out = Vec::with_capacity(input.len() / 2 + 64);
+    out.extend_from_slice(&LEGACY_MAGIC.to_le_bytes());
+    for block in input.chunks(LEGACY_BLOCK) {
+        let compressed = lz4_flex::block::compress(block);
+        let size = u32::try_from(compressed.len()).context("a compressed block is too large")?;
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&compressed);
     }
-    Ok(out.stdout)
+    out.extend_from_slice(&0u32.to_le_bytes());
+    Ok(out)
 }
 
 #[cfg(test)]

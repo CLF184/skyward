@@ -22,6 +22,9 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// The commands carry the paths and lists they were given; the largest is a
+// few hundred bytes, which is the one copy clap parses into either way.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Print an image's header and the files in its ramdisk.
     List { image: PathBuf },
@@ -150,10 +153,10 @@ fn main() -> Result<()> {
             for command in paths::COMMANDS {
                 rd.link(command, recovery)?;
             }
-            rd.add(paths::CONFIG, 0o644, read(&config)?)?;
-            rd.add(paths::FONT, 0o644, read(&font)?)?;
-            rd.add(paths::MONO, 0o644, read(&mono)?)?;
-            rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
+            put(&mut rd, paths::CONFIG, 0o644, read(&config)?)?;
+            put(&mut rd, paths::FONT, 0o644, read(&font)?)?;
+            put(&mut rd, paths::MONO, 0o644, read(&mono)?)?;
+            put(&mut rd, paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
             for file in firmware {
                 let (name, from) = file.split_once('=').with_context(|| "--firmware takes name=local-file")?;
                 ensure!(!name.is_empty() && !name.starts_with('/') && !name.contains(".."), "{name} is not a firmware name");
@@ -169,7 +172,7 @@ fn main() -> Result<()> {
             if rd.find(paths::TASK_PROFILES).is_none() {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
-            rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
+            put(&mut rd, paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
             // The OMAPI service the weaver reaches a secure element through,
             // and the description the service directory wants of it. The
             // recovery starts it with the phone's other services.
@@ -327,6 +330,16 @@ fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Put a regular file into `rd`: a file already there has its contents
+/// replaced, so a build can be made on top of an image made before it.
+fn put(rd: &mut Ramdisk, name: &str, mode: u32, data: Vec<u8>) -> Result<()> {
+    if rd.find(name).is_some() {
+        rd.replace(name, data)
+    } else {
+        rd.add(name, mode, data)
+    }
 }
 
 /// Write `bytes`, the image `img` makes, to `out`.
