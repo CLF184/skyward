@@ -1,10 +1,11 @@
 ![Skyward Recovery](assets/hero.jpg)
 
-# Skyward
+# Skyward for Xiaomi 15 Pro
 
 [English](README.md) | 简体中文
 
-Skyward 是使用 Rust 编写的 recovery，从零开始编写。
+Skyward 是使用 Rust 从零编写的 recovery。本仓库是为**一台手机**定制的分支：
+**小米 15 Pro（`haotian`）**，基于中国版系统 OS4.0.0.19。
 
 <p align="center">
   <img src="assets/home.png" width="30%" alt="首页">
@@ -12,16 +13,34 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
   <img src="assets/time-zone.png" width="30%" alt="时区">
 </p>
 
+## 本分支相对上游补了什么
+
+上游的 Skyward 是多机型的 recovery。本分支只保留 `devices/haotian.toml`，并补上
+解密这台手机 data 分区实际需要的东西：
+
+- **weaver 能应答了，所以只绑定 weaver 的用户也能解开。** 这类用户的密钥由安全元件
+  里的 weaver 看守，而 recovery 默认不会启动它依赖的三样东西，现在都由 Skyward 负责：
+  - `ssgtzd`，TEE 的 mink 服务。没有它，安全元件的 `TEEC_OpenSession` 一律返回
+    `0xFFFF0000`，安全元件根本打不开。
+  - `stm_st54se_gpio` 与 `stm_nfc_i2c` 两个内核模块，否则 `/dev/st54spi_gpio`
+    不存在。
+  - 安全元件的 HAL 以 `root` 运行，并且在 ADSP 就绪之后才启动。
+- **双击亮屏**，与手机自带系统一致。开启后息屏时不进入 suspend——因为睡下去就收不到
+  触摸了。
+- **ADSP 只等 3 秒，等不到就请加载器重试一次。** 某些版本的 `/vendor/firmware`
+  里 DSP 固件只有前半段，内核读到第一个缺失分段就停；Skyward 在 modem 分区被显示到
+  `/firmware`（内核固件搜索路径的最后一站）之后，请加载器再试一次。
+
 ## 功能
 
 ### 已实现
 
-- 使用锁屏密码解密 data 分区
+- 使用锁屏密码解密 data 分区，包括密钥只绑定 weaver、没有 `secdis` 备份的用户
 - 安装刷机包、系统更新包和分区镜像，支持内部存储、U 盘和 adb sideload
-- 刷机包的安装脚本可以使用 `7za` 和 `zstd`，支持刷入 super 镜像使用 zstd 压缩的第三方 ROM；`unzip -p` 边解压边输出镜像
-- 刷机包的安装脚本可以使用 `avbctl` 关闭验证启动的校验，使用 `resetprop` 读取和设置属性
+- 刷机包的安装脚本可以使用 `7za` 和 `zstd`；`unzip -p` 边解压边输出镜像
+- 刷机包的安装脚本可以使用 `avbctl` 关闭验证启动的校验，使用 `resetprop` 读写属性
 - 在线系统更新
-- Virtual A/B 更新：读取更新快照的状态，把分区映射到快照之上，再把快照合并回它所快照的分区，与系统自带的 recovery 做法一致
+- Virtual A/B 更新：读取更新快照的状态，把分区映射到快照之上，再把快照合并回去
 - 从 GitHub 上的最新版本在线更新 Skyward
 - 备份和恢复
 - 清除数据、恢复出厂设置
@@ -29,128 +48,131 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 - 文件管理和终端
 - 连接 WLAN
 - MTP 文件传输、adb 和 fastbootd
-- 重启到系统、recovery、fastboot、bootloader 和 EDL，切换启动槽位
-- 双系统：在已安装的系统旁边安装第二系统，文件保存在 data 分区中；在首页“双系统”的两张卡片中选择，滑动即可切换
-- 浅色和深色模式，简体中文、繁体中文和英文
+- 重启到系统、recovery、fastboot、bootloader 或 EDL，以及切换槽位
+- 双系统：在首页的两张卡片上选择，滑动切换
+- 浅色与深色主题；简体中文、繁体中文和英文
 
-### 尚未实现
+### 未实现
 
-- 快照经过压缩、由 snapuserd 提供的更新：本 recovery 只映射和合并内核快照，这类更新要等系统启动后在系统中合并
-- 增量更新包：它要求 recovery 在 Virtual A/B 手机上自行制作快照
-- 非 A/B 机型的更新包
-- 小米 15 Pro 的振动：马达驱动向内核请求一个 recovery 尚未建立的电源状态，见下文该机型说明
-- 下方「施工中」机型的 data 分区解密：尚未在这些机型上调通
-
-## 小米 15 Pro 说明
-
-`haotian` 已在真机上测试过，屏幕、触摸、adb 和 fastbootd、MTP，以及用锁屏密码解密 data 分区都可以使用。振动不可用：马达驱动向内核请求一个 recovery 尚未建立的电源状态，而驱动模块没有任何参数可以改变这一点。
-
-制作镜像所用的原厂版本是 OS4.0.0.19.XOBCNXM。
+- 由 `snapuserd` 提供压缩快照的更新：本 recovery 只映射并合并内核快照
+- 增量更新包
+- 没有 A/B 槽位的手机的更新包
 
 ## 支持的机型
 
-| 机型 | 代号 | 测试的系统版本 |
-| --- | --- | --- |
-| 小米 17 Ultra | `nezha` | OS4.0.4.0.XPACNXM（Android 17） |
-| 小米 13 Ultra | `ishtar` | OS3.0.308.0.WMACNXM（Android 16） |
+| 机型 | 代号 | 构建于 | 已实测 |
+| --- | --- | --- | --- |
+| 小米 15 Pro | `haotian` | OS4.0.0.19.XOBCNXM（Android 17） | 是 |
 
-### 🚧 施工中
+## 关于小米 15 Pro
 
-这些机型的镜像按照各自的原厂固件构建，还没有在真机上试过。屏幕、触摸、WLAN 和振动已经配置好，不会解密 data 分区。
+以下都在真机上试过并可用：屏幕（包括子像素渲染——这块面板把它交给显示控制器）、
+触摸屏与双击亮屏、adb 与 fastbootd、MTP、马达、WLAN，以及用锁屏密码解密 data 分区。
 
-| 机型 | 代号 | 构建所用的系统版本 |
-| --- | --- | --- |
-| 🚧 小米 13 | `fuxi` | OS3.0.309.0.WMCCNXM（Android 16） |
-| 🚧 小米 13 Pro | `nuwa` | OS3.0.312.0.WMBCNXM（Android 16） |
-| 🚧 小米 14 | `houji` | OS3.0.307.0.WNCCNXM（Android 16） |
-| 🚧 小米 14 Pro | `shennong` | OS3.0.309.0.WNBCNXM（Android 16） |
-| 🚧 小米 14 Ultra | `aurora` | OS3.0.308.0.WNACNXM（Android 16） |
-| 🚧 小米 15 | `dada` | OS3.0.307.0.WOCCNXM（Android 16） |
-| 🚧 小米 15 Pro | `haotian` | OS3.0.309.0.WOBCNXM（Android 16） |
-| 🚧 小米 15 Ultra | `xuanyuan` | OS3.0.314.0.WOACNXM（Android 16） |
-| 🚧 小米 17 | `pudding` | OS4.0.4.0.XPCCNXM（Android 17） |
-| 🚧 小米 17 Pro | `pandora` | OS4.0.4.0.XBLCNXM（Android 17） |
-| 🚧 小米 17 Pro Max | `popsicle` | OS4.0.4.0.XPBCNXM（Android 17） |
-| 🚧 小米 17 Max | `byron` | OS3.0.310.0.WAFCNXM（Android 16） |
-| 🚧 REDMI K80 | `zorn` | OS3.0.309.0.WOKCNXM（Android 16） |
-| 🚧 REDMI K80 Pro | `miro` | OS3.0.305.0.WOMCNXM（Android 16） |
-| 🚧 REDMI K90 | `annibale` | OS3.0.307.0.WPKCNXM（Android 16） |
-| 🚧 REDMI K90 Pro Max | `myron` | OS4.0.4.0.XPMCNXM（Android 17） |
-| 🚧 REDMI K90 Ultra | `warsaw` | OS3.0.309.0.WHPCNXM（Android 16） |
-| 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM（Android 17） |
-| 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM（Android 17） |
+镜像基于的官方版本是 OS4.0.0.19.XOBCNXM。
+
+### 如果仍然解不开
+
+内核日志会说明卡在哪一环。先找这一行
+`the blob the phone records is bound to a weaver; the blobs beside it are …`，然后：
+
+- `the phone's weaver cannot answer` —— 传输链：`ssgtzd`、eSE 驱动，或安全元件 HAL。
+- `the secure element does not recognise that credential` —— 密码不对。
+- `the secure element is holding off further tries` —— 安全元件在多次错误尝试后限流。
+
+如果问题在 DSP，日志里会有 `the ADSP is offline; asked the loader again now that
+/firmware is in place`，随后要么 DSP 起来了，要么是
+`it is not running, even after the loader was asked again`。
 
 ## 安装
 
-Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/kirklin/skyward/releases) 下载对应机型的 zip，每个文件都标有机型和代号，例如 Xiaomi 17 Ultra (nezha)。使用 `SHA256SUMS` 核对并解压之后，在手机处于 fastboot 模式的时候，把其中的镜像刷入当前运行槽位的 recovery 分区：
+需要先解锁 bootloader。从
+[Releases](https://github.com/Rinrroy/skyward-for-haotian/releases) 下载镜像，
+对照 `SHA256SUMS` 校验，然后在 fastboot 模式下把它刷到手机当前槽位的 recovery 分区：
 
 ```sh
-unzip skyward-v0.2.0-nezha-OS4.0.4.0.XPACNXM.zip
-fastboot flash recovery skyward-v0.2.0-nezha-OS4.0.4.0.XPACNXM.img
+sha256sum --check SHA256SUMS
+fastboot flash recovery skyward-v0.2.1-haotian-OS4.0.0.19.XOBCNXM.img
 fastboot reboot recovery
 ```
 
-之后连接 WLAN，就可以在“设置”的“Skyward 更新”页面更新到最新版本，也可以在 Skyward 自己的“安装”页面安装解压出来的新版镜像。打开 **自动重新刷入 Skyward** 之后，系统更新或者刷机包覆盖 recovery 分区的时候，Skyward 会重新刷回这些分区。
+之后 Skyward 可以在「设置」的更新页里通过 Wi-Fi 在线更新；新镜像也可以从它自己的
+「安装」页刷入。开启**再次刷入 Skyward** 后，写入 recovery 分区的系统更新或刷机包
+会把 Skyward 重新装回去。
 
-super 中没有系统的时候，Skyward 仍然可以启动：屏幕和按键、adb、`adb sideload` 和 fastbootd 都能使用，足够装回一个系统。触摸、WLAN 和解密依赖已安装系统中的程序，系统装回之后随之恢复。
+super 里没有系统时 Skyward 仍能启动，有屏幕、按键、adb、`adb sideload` 和 fastbootd，
+足够装一个系统进去。触摸、WLAN 和解密都依赖已安装的系统，系统装好后即可用。
 
-Skyward 中的 adb 是 root shell，手机上无需授权：手机处于 recovery 的时候，任何人拿到手机和数据线都能访问其中的存储。
+Skyward 里的 adb 是不需要授权的 root shell：拿到手机和线的人就能在 recovery 期间
+访问它的存储。
 
 ## 双系统
 
-Skyward 可以在手机自身分区中的系统旁边安装第二系统，主系统是 HyperOS 或者第三方 ROM 都可以，并在首页的“双系统”中切换。第二系统的根文件系统是 data 分区中的一个文件，文件系统不能移动或删除它，Skyward 直接通过分区读写其中的内容；两个系统的启动镜像保存在另一个这样的文件中。切换系统只改写下次启动槽位的 boot 和 init_boot 分区，每一步都先记录在 /metadata 中，切换过程中断电的话，Skyward 下次启动时会完成这次切换。vendor_boot、dtbo、recovery、vbmeta、固件和 super 都保持不变，第二系统使用主系统的 vendor_boot 和 dtbo 启动。
+Skyward 可以把第二个系统装在手机分区之外，并在首页的**双系统**里切换。第二个系统的
+根是 data 分区里的一个文件，文件系统既不能移动也不能删除它；两套系统的 boot 镜像
+也各存在这样的文件里。切换只写下一个启动槽位的 boot 与 init_boot 分区，每一步先落在
+`/metadata` 上，所以断电打断的切换会在 Skyward 下次启动时补完。vendor_boot、dtbo、
+recovery、vbmeta、固件和 super 都保持原样。
 
-其他操作写入启动分区之前，Skyward 会先把主系统的启动镜像写回：安装、切换启动槽位、fastboot、恢复出厂设置，以及备份或恢复启动分区。系统更新尚未合并的时候，暂不切换到第二系统；备份 data 分区的时候不包含第二系统。
-
-第二系统的安装包是 zip 文件，和其他安装包一样在“安装”页面安装：
+第二个系统从「安装」页的 zip 安装：
 
 | 文件 | 内容 |
 | --- | --- |
-| `system.toml` | `id`、`name`、`version` 和 `filesystem`；`init` 是根文件系统中第一个运行的程序，默认为 `/sbin/init`；`minimum` 是根文件系统至少需要的空间，单位为字节 |
+| `system.toml` | `id`、`name`、`version`、`filesystem`；`init`；`minimum`，根所需的最小空间 |
 | `boot.img` | bootloader 启动的内核 |
-| `rootfs.img` | 根文件系统的镜像，格式为 `filesystem` 指定的文件系统 |
-| `init_boot.img` | 只有自带第一阶段 ramdisk 的系统需要 |
+| `rootfs.img` | 根文件系统的镜像 |
+| `init_boot.img` | 仅用于自带 first ramdisk 的系统 |
 
-没有自带 init_boot 镜像的系统，从 Skyward 生成的 init_boot 镜像启动。其中的程序按照主系统第一阶段的方式加载第一阶段的内核模块，包括模块之间的软依赖和内核命令行中给模块的参数，然后在 data 分区中找到根文件系统，挂载之后运行其中的 `init`。启动过程中出现任何错误，这个程序都会进入 Skyward，和主系统启动失败时进入 recovery 一样：它在 misc 中留下原因，把当前槽位 recovery 分区中的 ramdisk 按照 bootloader 启动 recovery 时内核解包的方式解包到自己的 ramdisk 上，然后交给 Skyward 的第一个程序运行，所以无论 bootloader 怎样处理重启，都能进入 Skyward。Skyward 显示原因；用户在“双系统”中切换之前，下次启动的仍是第二系统。启动长时间没有进展时，这个程序改为重启到 recovery；交给第二系统之前手机重启的话，下次启动时它会在 misc 中看到同样的请求，先进入 Skyward。两种方式都无法进入 Skyward 时，手机停留在出错的地方，不会反复启动同一个系统。自带第一阶段 ramdisk 的系统可以运行 Skyward 放在 `/skyward/map` 的程序，它把根文件系统映射为块设备，并输出设备节点的路径。每次切换到第二系统，Skyward 都用自己带的程序写入第二系统的 init_boot 镜像，所以更新 Skyward 以后，第二系统也用新的程序启动。
-
-正在运行的系统也可以请求切换：在 misc 中写入 `boot-recovery` 和 `--switch_system=installed`，或者 `--switch_system=` 加上第二系统的 `id`，然后重启到 recovery。bootloader 仍然启动这个槽位的话（小米 13 Ultra 连着 USB 线时可能这样），Skyward 的程序会在下次启动时在 misc 中看到这个请求，先进入 Skyward。
+没有自带 init_boot 的系统会用 Skyward 生成的：一个静态链接的程序，按已安装系统的
+首阶段方式加载内核模块，在 data 分区里找到根、挂载并启动其中的 `init`。中途失败就
+改为启动 Skyward，并说明原因。
 
 ## 构建
 
-Skyward 使用 `rust-toolchain.toml` 指定的稳定版 Rust 和它的 `aarch64-linux-android` 目标、Android NDK r29 和 [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) 构建。recovery 服务针对手机构建，打包工具针对电脑构建：
+Skyward 用 `rust-toolchain.toml` 指定的稳定版 Rust、`aarch64-linux-android` 目标、
+Android NDK 和 [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) 构建。recovery 服务和
+第二系统的首个程序针对手机构建，打包工具针对电脑构建：
 
 ```sh
 cargo ndk -t arm64-v8a --platform 30 build --release -p skyward
+RUSTFLAGS="-C target-feature=+crt-static" cargo ndk -t arm64-v8a --platform 30 build --release -p skyward-system-init --target-dir target/system-init
 cargo build --release -p skyward-pack
 ```
 
-第二系统启动时运行的第一个程序在任何动态库可用之前运行，因此构建为静态程序：
+打包工具从小米服务器上的完整更新包中取出官方 recovery 分区（只读取该分区所需的那部分），
+并对照设备文件里的 SHA-256 校验：
 
 ```sh
-RUSTFLAGS="-C target-feature=+crt-static" cargo ndk -t arm64-v8a --platform 30 build --release -p skyward-system-init --target-dir target/system-init
+target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img
+target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img --partition odm
 ```
 
-打包工具从小米服务器上这个版本的完整更新包中取出原厂 recovery 分区，只读取这个分区所在的部分，并且按照设备配置文件核对 SHA-256：
-
-```sh
-target/release/skyward-pack stock --config devices/nezha.toml --out target/stock/nezha/recovery.img
-```
-
-然后在它的基础上构建镜像：
+然后在它之上构建镜像：
 
 ```sh
 target/release/skyward-pack recovery \
-  --stock target/stock/nezha/recovery.img \
+  --stock target/stock/haotian/recovery.img \
   --binary target/aarch64-linux-android/release/skyward \
   --system-init target/system-init/aarch64-linux-android/release/system-init \
-  --config devices/nezha.toml \
+  --config devices/haotian.toml \
   --font resources/fonts/MiSansVF.ttf \
   --mono resources/fonts/KirkMono-Regular.ttf \
   --mono-license resources/fonts/KirkMono-OFL.txt \
-  --out target/skyward-nezha.img
+  --firmware cs40l26.wmfw=stock/firmware/cs40l26.wmfw \
+  --firmware cs40l26.bin=stock/firmware/cs40l26.bin \
+  --firmware cs40l26-svc.bin=stock/firmware/cs40l26-svc.bin \
+  --firmware cs40l26-dvl.bin=stock/firmware/cs40l26-dvl.bin \
+  --firmware cs40l26-dbc.bin=stock/firmware/cs40l26-dbc.bin \
+  --firmware cs40l26-a2h.bin=stock/firmware/cs40l26-a2h.bin \
+  --omapi resources/omapi \
+  --out target/skyward-haotian.img
 ```
 
-测试和代码检查在电脑上运行；只在手机上运行的代码按照手机目标检查：
+马达固件必须在 init 第一次探测之前就在 ramdisk 里，`--omapi` 则放入 Thales weaver
+访问安全元件所需的 OMAPI 服务。`.github/workflows/build-haotian.yml` 会在打 tag 时
+完成这些，并把镜像连同校验和一起发布。
+
+测试和 lint 在电脑上跑；只在手机上运行的代码则针对手机构建后 lint：
 
 ```sh
 cargo test --workspace
@@ -158,11 +180,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -p skyward-systems -p skyward-system-init -- -D warnings
 ```
 
-`skyward-preview` 无需手机，在电脑上把页面绘制成 PNG 文件：每个页面完整绘制成长截图的样子，覆盖它可能处于的各种状态，另外还有触摸和动画过程中某些时刻的屏幕。`--lang` 按照地区代码选择语言，例如 `en` 或者 `zh-TW`：
+Windows 主机可以交叉编译手机端、可以跑 `skyward-config` 的测试，但既不能打包镜像
+（`skyward-bootimg` 用了 Unix 专属调用），也不能编译 `skyward-ui` 的测试
+（`rsproperties` 在 Windows 上编译不过）。这两件事请用 Linux 或 CI。
+
+`skyward-preview` 在电脑上把各页面画成 PNG，不需要手机。`--lang` 按 locale 选择语言，
+例如 `en` 或 `zh-TW`：
 
 ```sh
 cargo run --release -p skyward-preview -- target/preview --lang en
 ```
+
+## 阅读本仓库
+
+`AGENT.md` 是工作笔记：每部分知识花了多大代价才学到、诊断代码必须遵守的规矩，以及
+针对这台手机的 weaver、ADSP 与面板为何如此。提交信息会详细解释**为什么**。
 
 ## 许可证
 

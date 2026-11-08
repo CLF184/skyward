@@ -772,20 +772,24 @@ mod tests {
     }
 
     #[test]
-    fn nezha_gives_its_logd_the_libraries_its_recovery_leaves_out() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
-        let logd = cfg.logd.expect("the 17 Ultra's recovery leaves out what its logd loads");
+    fn a_phone_gives_its_logd_the_libraries_its_recovery_leaves_out() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        let logd = cfg.logd.expect("haotian's recovery leaves out what its logd loads");
         assert_eq!(logd.libraries, ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]);
-        let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
-        assert_eq!(ishtar.logd, None, "the 13 Ultra's recovery carries both");
+        // A phone whose recovery carries both names none, and has no logd of
+        // its own started for it.
+        let bare = DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap();
+        assert_eq!(bare.logd, None);
     }
 
     #[test]
-    fn ishtar_clicks_with_a_waveform_its_driver_keeps() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
-        let haptics = cfg.haptics.expect("the 13 Ultra has a motor");
-        assert_eq!((haptics.click, haptics.resonance.as_deref()), (Some(0), Some("/sys/class/qcom-haptics/lra_frequency_hz")));
-        assert_eq!(haptics.strength, Strength { lightest: 0.5, strongest: 1.0 });
+    fn haotian_clicks_at_the_frequency_its_motor_swings_at() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        let haptics = cfg.haptics.expect("haotian has a motor");
+        // The CS40L26 says its frequency nowhere, so the click is made at the
+        // nominal one rather than played from a waveform kept by the driver.
+        assert_eq!((haptics.click, haptics.resonance.as_deref()), (None, Some("/sys/bus/i2c/devices/0-0043/input/input6/calibration/f0_stored")));
+        assert_eq!(haptics.strength, Strength { lightest: 0.25, strongest: 0.75 });
     }
 
     #[test]
@@ -856,35 +860,45 @@ mod tests {
     }
 
     #[test]
-    fn parses_nezha() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
-        assert_eq!(cfg.device.codename, "nezha");
+    fn parses_haotian() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "haotian");
+        assert_eq!(cfg.device.model, "Xiaomi 15 Pro");
+        assert!(cfg.device.ab);
         assert_eq!(cfg.device.os_version_prop, "ro.mi.os.version.incremental");
-        let soc = cfg.device.soc.expect("nezha names its SoC");
-        assert_eq!(soc.hans, "第五代骁龙®8至尊版移动平台");
-        assert_eq!(soc.en, "Snapdragon® 8 Elite Gen 5 Mobile Platform");
-        assert_eq!(cfg.display.width, 1200);
-        assert_eq!(cfg.display.diagonal, Some(6.9));
-        assert_eq!(cfg.modules.load, ["synaptics_tcm2"]);
+        let soc = cfg.device.soc.expect("haotian names its SoC");
+        assert_eq!(soc.en, "Snapdragon® 8 Elite Mobile Platform");
+        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 600));
+        assert_eq!(cfg.display.diagonal, Some(6.73));
+        assert_eq!(cfg.display.corner_radius, 140);
+        // The touchscreen, and the two drivers the secure element's HAL needs
+        // before it can see the eSE at all.
+        assert_eq!(cfg.modules.load, ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]);
         assert_eq!(
             cfg.touch.writes,
             [Write { path: "/sys/class/touch/touch_dev/enable_touch_raw".into(), value: "0".into() }],
             "its controller reports positions itself"
         );
-        assert!(!cfg.touch.double_tap, "this phone is left as it was: the power key lights its panel");
+        assert!(cfg.touch.double_tap, "two taps light its dark panel, as the phone's own system's do");
         assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into() }));
         assert_eq!(cfg.partitions.mounted, ["persist"], "the secure world keeps its own files there");
+        // The programs the credential chain runs, in the order they start:
+        // the TEE's listener, its mink daemon, the loader, then the key,
+        // credential and secure-element services, the OMAPI service the
+        // Thales weaver reaches its element through, and that weaver.
         let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(
             paths,
             [
                 "/vendor/bin/sh",
                 "/vendor/bin/qseecomd",
+                "/vendor/bin/ssgtzd",
                 "/vendor/bin/hlosminkdaemon",
-                "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti",
-                "/vendor/bin/hw/android.hardware.gatekeeper-rust-service-qti",
-                "/odm/bin/hw/android.hardware.secure_element-service-goodix",
-                "/odm/bin/hw/android.hardware.weaver-service",
+                "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
+                "/vendor/bin/hw/android.hardware.gatekeeper-service-qti",
+                "/vendor/bin/hw/android.hardware.secure_element-service.qti",
+                "/system/bin/se_omapi",
+                "/odm/bin/hw/android.hardware.weaver-service.thales",
                 "/vendor/bin/hw/android.hardware.boot-service.qti",
             ]
         );
@@ -892,42 +906,47 @@ mod tests {
             assert_eq!(s.libraries[..2], ["/system/lib64", "/vendor/lib64"], "{} loads the recovery's own libraries first", s.path);
             assert_eq!(s.ready_hardware_service, None, "{} is of the newer kind", s.path);
         }
-        let [post_boot, listeners, opener, keymint, gatekeeper, element, weaver, boot] = &cfg.services[..] else { panic!("eight programs") };
+        let [post_boot, listeners, mink, opener, keymint, gatekeeper, element, omapi, weaver, boot] = &cfg.services[..] else {
+            panic!("ten programs")
+        };
         assert!(post_boot.oneshot, "the system's own settings for after start are made once");
         assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
         assert!(cfg.services[1..].iter().all(|s| !s.oneshot && s.args.is_empty()));
         assert_eq!(listeners.ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
+        // The mink daemon registers nothing: what it makes is the two sockets
+        // the trustlets wait on.
+        assert_eq!((mink.ready_property.as_ref(), mink.ready_service.as_ref()), (None, None));
+        assert_eq!(mink.sockets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["ssgtzd", "ssgtzd_opener"]);
         assert_eq!((opener.ready_property.as_ref(), opener.ready_service.as_ref()), (None, None));
         assert_eq!(keymint.ready_service.as_deref(), Some("android.hardware.security.keymint.IKeyMintDevice/default"));
         assert!(keymint.registers.contains(&"android.hardware.security.secureclock.ISecureClock/default".to_string()));
         assert!(keymint.registers.contains(&"android.hardware.security.sharedsecret.ISharedSecret/default".to_string()));
         assert_eq!(gatekeeper.ready_service.as_deref(), Some("android.hardware.gatekeeper.IGatekeeper/default"));
-        assert_eq!(element.ready_service.as_deref(), Some("android.hardware.secure_element.ISecureElement/eSE2"));
-        assert_eq!(element.description.as_deref(), Some("/odm/etc/secure_element-service-goodixsp.xml"));
+        assert_eq!(gatekeeper.user.as_deref(), Some("root"), "the trustlet is unreachable as system");
+        assert_eq!(element.ready_service.as_deref(), Some("android.hardware.secure_element.ISecureElement/eSE1"));
+        assert_eq!(element.user.as_deref(), Some("root"), "it opens QSEECom, and asks the element over the ADSP");
+        assert_eq!(omapi.ready_service.as_deref(), Some("android.se.omapi.ISecureElementService/default"));
         assert_eq!(weaver.ready_service.as_deref(), Some("android.hardware.weaver.IWeaver/default"));
+        assert_eq!(weaver.user.as_deref(), Some("vendor_thales_weaver"));
         assert_eq!(boot.ready_service.as_deref(), Some("android.hardware.boot.IBootControl/default"));
-        let haptics = cfg.haptics.expect("the 17 Ultra has a motor");
-        assert_eq!((haptics.click, haptics.resonance.as_deref()), (None, Some("/sys/class/qcom-haptics/lra_frequency_hz")), "its click is made");
+        // The CS40L26 says its frequency nowhere, so the click is made at the
+        // nominal one, from the calibration the motor was tested with.
+        let haptics = cfg.haptics.expect("haotian has a motor");
+        assert_eq!(
+            (haptics.click, haptics.resonance.as_deref()),
+            (None, Some("/sys/bus/i2c/devices/0-0043/input/input6/calibration/f0_stored"))
+        );
         assert_eq!(haptics.strength, Strength { lightest: 0.25, strongest: 0.75 }, "past three quarters the motor rattles");
+        assert_eq!(haptics.modules, ["cs40l26-core", "cs40l26-i2c"]);
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
-        assert!(cfg.backup.data_skipped.contains(&"vendor/goodix".to_string()));
+        assert!(cfg.backup.data_skipped.contains(&"vendor/mitee".to_string()));
         assert!(cfg.wipe.logs.contains(&"/data/vendor/bsplog".to_string()));
+        // The panel's own doze, and the two taps that light it.
+        assert_eq!((cfg.aod.as_ref().map(|a| a.enter_cmds.clone()), cfg.aod.as_ref().map(|a| a.leave_cmds.clone())), (Some(vec![44]), Some(vec![18])));
+        assert_eq!(cfg.wlan.as_ref().map(|w| w.interface.as_str()), Some("wlan0"));
     }
 
-    #[test]
-    fn the_secure_element_of_each_build_runs_on_that_build_alone() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
-        let runs = |props: &[(&str, &str)]| -> Vec<String> {
-            let props: HashMap<String, String> = props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-            cfg.services.iter().filter(|s| s.runs_on(&props)).map(|s| s.path.clone()).collect()
-        };
-        let leica = runs(&[("ro.special_edition", "true")]);
-        assert_eq!(leica.len(), 8);
-        let plain = runs(&[]);
-        assert_eq!(plain.len(), 6);
-        assert!(!plain.iter().any(|p| p.starts_with("/odm/")), "the other builds' weaver cannot run in a recovery");
-        assert_eq!(runs(&[("ro.special_edition", "false")]), plain);
-    }
+
 
     #[test]
     fn a_program_runs_only_where_the_property_has_its_value() {
@@ -975,50 +994,42 @@ mod tests {
     }
 
     #[test]
-    fn each_phones_programs_run_as_their_init_scripts_run_them() {
-        let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
-        let ishtar = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
-        for s in nezha.services.iter().chain(&ishtar.services) {
+    fn haotians_programs_run_as_their_init_scripts_run_them() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        for s in &cfg.services {
             assert!(s.user.is_some(), "{} names the user its init script does", s.path);
         }
-        let find = |cfg: &DeviceConfig, path: &str| cfg.services.iter().find(|s| s.path == path).cloned().expect("listed");
-        let element = find(&nezha, "/odm/bin/hw/android.hardware.secure_element-service-goodix");
-        assert_eq!((element.user.as_deref(), &element.groups[..]), (Some("system"), &["system".to_string()][..]), "its logs in the data partition are the system's");
-        let weaver = find(&nezha, "/odm/bin/hw/android.hardware.weaver-service");
-        assert_eq!(weaver.capabilities, ["WAKE_ALARM"]);
-        let listeners = find(&nezha, "/vendor/bin/qseecomd");
+        let find = |path: &str| cfg.services.iter().find(|s| s.path == path).cloned().expect("listed");
+        let element = find("/vendor/bin/hw/android.hardware.secure_element-service.qti");
+        assert_eq!(
+            (element.user.as_deref(), &element.groups[..]),
+            (Some("root"), &["root".to_string(), "nfc".to_string()][..]),
+            "it opens QSEECom, and asks the element for its vendor id over the ADSP"
+        );
+        let weaver = find("/odm/bin/hw/android.hardware.weaver-service.thales");
+        assert_eq!(
+            (weaver.user.as_deref(), &weaver.groups[..]),
+            (
+                Some("vendor_thales_weaver"),
+                &["vendor_thales_weaver".to_string(), "system".to_string(), "drmrpc".to_string()][..]
+            )
+        );
+        let listeners = find("/vendor/bin/qseecomd");
         assert_eq!((listeners.user.as_deref(), &listeners.groups[..]), (Some("root"), &["root".to_string(), "drmrpc".to_string()][..]));
-        let opener = find(&nezha, "/vendor/bin/hlosminkdaemon");
+        let opener = find("/vendor/bin/hlosminkdaemon");
         assert_eq!(opener.capabilities, ["WAKE_ALARM", "BLOCK_SUSPEND"]);
-        let touch = find(&ishtar, "/odm/bin/touch_report");
-        assert_eq!((touch.user.as_deref(), &touch.capabilities[..]), (Some("system"), &["SYS_NICE".to_string()][..]));
+        // The mink daemon keeps falling asleep off the CPU without these, and
+        // a trustlet waiting on it then waits for good.
+        let mink = find("/vendor/bin/ssgtzd");
+        assert_eq!(mink.capabilities, ["WAKE_ALARM", "BLOCK_SUSPEND"]);
+        assert_eq!(mink.user.as_deref(), Some("system"));
     }
 
     #[test]
-    fn each_phone_names_the_stock_build_its_recovery_is_made_on() {
-        for (text, version) in [
-            (include_str!("../../../devices/nezha.toml"), "OS4.0.4.0.XPACNXM"),
-            (include_str!("../../../devices/ishtar.toml"), "OS3.0.308.0.WMACNXM"),
-            (include_str!("../../../devices/pudding.toml"), "OS4.0.4.0.XPCCNXM"),
-            (include_str!("../../../devices/pandora.toml"), "OS4.0.4.0.XBLCNXM"),
-            (include_str!("../../../devices/popsicle.toml"), "OS4.0.4.0.XPBCNXM"),
-            (include_str!("../../../devices/myron.toml"), "OS4.0.4.0.XPMCNXM"),
-            (include_str!("../../../devices/songyuan.toml"), "OS4.0.4.0.XGNCNXM"),
-            (include_str!("../../../devices/athens.toml"), "OS4.0.4.0.XPICNXM"),
-            (include_str!("../../../devices/fuxi.toml"), "OS3.0.309.0.WMCCNXM"),
-            (include_str!("../../../devices/nuwa.toml"), "OS3.0.312.0.WMBCNXM"),
-            (include_str!("../../../devices/houji.toml"), "OS3.0.307.0.WNCCNXM"),
-            (include_str!("../../../devices/shennong.toml"), "OS3.0.309.0.WNBCNXM"),
-            (include_str!("../../../devices/aurora.toml"), "OS3.0.308.0.WNACNXM"),
-            (include_str!("../../../devices/dada.toml"), "OS3.0.307.0.WOCCNXM"),
-            (include_str!("../../../devices/haotian.toml"), "OS4.0.0.19.XOBCNXM"),
-            (include_str!("../../../devices/xuanyuan.toml"), "OS3.0.314.0.WOACNXM"),
-            (include_str!("../../../devices/byron.toml"), "OS3.0.310.0.WAFCNXM"),
-            (include_str!("../../../devices/zorn.toml"), "OS3.0.309.0.WOKCNXM"),
-            (include_str!("../../../devices/miro.toml"), "OS3.0.305.0.WOMCNXM"),
-            (include_str!("../../../devices/annibale.toml"), "OS3.0.307.0.WPKCNXM"),
-            (include_str!("../../../devices/warsaw.toml"), "OS3.0.309.0.WHPCNXM"),
-        ] {
+    fn the_phone_names_the_stock_build_its_recovery_is_made_on() {
+        for (text, version) in
+            [(include_str!("../../../devices/haotian.toml"), "OS4.0.0.19.XOBCNXM")]
+        {
             let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
             assert_eq!(stock.version, version);
             assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
@@ -1055,58 +1066,60 @@ mod tests {
         assert!(with("").is_err());
         assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().partitions.mounted.is_empty(), "a phone may need none");
     }
-
     #[test]
-    fn parses_ishtar() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
-        assert_eq!(cfg.device.codename, "ishtar");
-        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 560));
-        assert_eq!(cfg.modules.load, ["fts_touch_spi"]);
-        assert!(cfg.touch.writes.is_empty(), "its own touch processing runs");
+    fn parses_haotians_touch_layer() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "haotian");
+        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.density), (1440, 3200, 600));
+        assert_eq!(cfg.modules.load, ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]);
+        // The node the phone's own init opens to every program, which a
+        // recovery leaves the owner's alone: the touch layer writes through
+        // it, so it is handed back to root with a mode every account may use.
         let [touch_owners] = &cfg.owners[..] else { panic!("one run of the touch layer's files") };
-        assert_eq!((touch_owners.user.as_str(), touch_owners.group.as_str(), touch_owners.mode), ("system", "system", 0o664));
+        assert_eq!((touch_owners.user.as_str(), touch_owners.group.as_str(), touch_owners.mode), ("root", "root", 0o666));
         assert!(
             touch_owners.paths.iter().any(|p| p == "/dev/xiaomi-touch"),
-            "the touch processing, run as system, opens the touch layer's node"
+            "the touch layer's node, which the panel reports positions through"
         );
-        assert!(cfg.firmware.is_none(), "its recovery mounts the modem partition itself");
+        assert_eq!(cfg.firmware, Some(FirmwarePartition { partition: "modem".into() }), "the modem partition holds the firmware");
+        // The programs the recovery starts, in the order it starts them: the
+        // phone's own settings made once, then the TEE's listener, its mink
+        // daemon, the loader, the key and credential services, the secure
+        // element, the OMAPI service the Thales weaver reaches it through,
+        // that weaver itself, and the boot control.
         let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(
             paths,
             [
-                "/odm/bin/touch_report",
-                "/odm/bin/touchsensor",
+                "/vendor/bin/sh",
                 "/vendor/bin/qseecomd",
+                "/vendor/bin/ssgtzd",
+                "/vendor/bin/hlosminkdaemon",
                 "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
-                "/mnt/system_ext/bin/hwservicemanager",
-                "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti",
-                "/vendor/bin/hw/android.hardware.boot@1.2-service",
+                "/vendor/bin/hw/android.hardware.gatekeeper-service-qti",
+                "/vendor/bin/hw/android.hardware.secure_element-service.qti",
+                "/system/bin/se_omapi",
+                "/odm/bin/hw/android.hardware.weaver-service.thales",
+                "/vendor/bin/hw/android.hardware.boot-service.qti",
             ]
         );
-        assert_eq!(cfg.services[1].libraries, ["/odm/lib64", "/system/lib64"]);
-        assert_eq!(cfg.services[0].ready_property, None, "the touch programs are ready as soon as they run");
-        assert_eq!(cfg.services[2].ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
+        assert!(cfg.services[0].oneshot, "the settings for after start are made once");
+        assert_eq!(cfg.services[2].ready_property, None, "the mink daemon is ready when its sockets are, and registers nothing");
         assert_eq!(
-            cfg.services[3].ready_service.as_deref(),
+            cfg.services[4].ready_service.as_deref(),
             Some("android.hardware.security.keymint.IKeyMintDevice/default")
         );
-        assert_eq!(
-            cfg.services[4].ready_property.as_deref(),
-            Some("hwservicemanager.ready"),
-            "the directory for the hardware services says so itself"
-        );
-        assert_eq!(
-            cfg.services[5].ready_hardware_service.as_deref(),
-            Some("android.hardware.gatekeeper@1.0::IGatekeeper/default")
-        );
-        assert_eq!(cfg.services[6].ready_hardware_service.as_deref(), Some("android.hardware.boot@1.2::IBootControl/default"));
+        assert_eq!(cfg.services[6].ready_service.as_deref(), Some("android.hardware.secure_element.ISecureElement/eSE1"));
+        assert_eq!(cfg.services[7].ready_service.as_deref(), Some("android.se.omapi.ISecureElementService/default"));
+        assert_eq!(cfg.services[9].ready_service.as_deref(), Some("android.hardware.boot.IBootControl/default"));
+        assert!(cfg.services.iter().all(|s| s.ready_hardware_service.is_none()), "every one of them is of the newer kind");
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
         assert!(cfg.backup.data_skipped.contains(&"vendor/tzstorage".to_string()));
     }
 
     #[test]
     fn the_phone_is_read_from_a_configuration_this_build_cannot_read_whole() {
-        assert_eq!(codename(include_str!("../../../devices/ishtar.toml")).unwrap(), "ishtar");
+        assert_eq!(codename(include_str!("../../../devices/haotian.toml")).unwrap(), "haotian");
         let later = "[device]\ncodename = \"x\"\nab = \"no longer a switch\"\n[display]\nwidth = \"wide\"\n[aurora]\nnew = 1\n";
         assert!(DeviceConfig::parse(later).is_err());
         assert_eq!(codename(later).unwrap(), "x");
@@ -1124,7 +1137,7 @@ mod tests {
 
     #[test]
     fn the_phones_own_logs_are_folders_inside_the_data_partition() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
         assert!(cfg.wipe.logs.contains(&"/data/vendor/diag".to_string()));
         assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().wipe.logs.is_empty(), "a phone may have none");
         for bad in ["/data", "/data/", "/metadata/logs", "data/log", "/data/../system"] {
@@ -1134,32 +1147,25 @@ mod tests {
     }
 
     #[test]
-    fn ishtar_brings_its_wlan_up_from_its_own_partitions() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
-        let wlan = cfg.wlan.expect("the 13 Ultra's WLAN is described");
-        assert_eq!(wlan.modules, ["qca_cld3_kiwi_v2"]);
-        assert_eq!(wlan.writes, [Write { path: "/sys/kernel/cnss/fs_ready".into(), value: "1".into() }]);
-        assert_eq!(wlan.firmware[0].partition, None);
+    fn haotian_brings_its_wlan_up_from_its_own_partitions() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        assert!(cfg.modules.sources.iter().any(|s| s == "system_dlkm"), "the kernel's own modules are a source");
+        let wlan = cfg.wlan.expect("haotian's WLAN is described");
+        assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
+        assert_eq!(
+            wlan.writes,
+            [Write { path: "/sys/bus/platform/devices/b0000000.qcom,cnss-peach/fs_ready".into(), value: "1".into() }]
+        );
+        assert_eq!(wlan.firmware[0].path, "/vendor/etc/wifi/peach/WCNSS_qcom_cfg.ini");
         assert_eq!(wlan.firmware[1].partition.as_deref(), Some("persist"));
-        assert_eq!(wlan.firmware[1].path, "kiwi_v2/wlan_mac.bin");
+        assert_eq!(wlan.firmware[1].path, "wlan/wlan_mac.bin");
+        assert_eq!(wlan.libraries, ["/system/lib64", "/vendor/lib64"], "the recovery's own libraries come first");
         assert_eq!(wlan.interface, "wlan0");
         assert_eq!(wlan.service, "android.hardware.wifi.supplicant.ISupplicant/default");
         assert_eq!(wlan.probe, "http://connect.rom.miui.com/generate_204");
         assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
     }
 
-    #[test]
-    fn nezha_brings_its_wlan_up_from_its_own_partitions() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
-        assert!(cfg.modules.sources.iter().any(|s| s == "system_dlkm"), "the kernel's own modules are a source");
-        let wlan = cfg.wlan.expect("the 17 Ultra's WLAN is described");
-        assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
-        assert_eq!(wlan.writes, [Write { path: "/sys/kernel/cnss/fs_ready".into(), value: "1".into() }]);
-        assert!(wlan.firmware.is_empty(), "the vendor's own links reach its settings and persist's MAC address");
-        assert_eq!(wlan.libraries, ["/system/lib64", "/vendor/lib64"], "the recovery's own libraries come first");
-        assert_eq!(wlan.probe, "http://connect.rom.miui.com/generate_204", "as the stock system asks it");
-        assert_eq!(cfg.update.expect("its update server is known").server, "https://update.miui.com/updates/miotaV3.php");
-    }
 
     #[test]
     fn a_wlan_is_probed_over_plain_http() {
@@ -1184,14 +1190,19 @@ mod tests {
 
     #[test]
     fn services_use_the_partitions_they_run_from() {
-        let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
-        let [report, sensor, listeners, ..] = &cfg.services[..] else { panic!("ishtar keeps several programs running") };
-        assert!(report.uses(Path::new("/odm")));
-        assert!(sensor.uses(Path::new("/odm")));
-        assert!(!report.uses(Path::new("/odm_dlkm")), "a longer name is another partition");
-        assert!(!sensor.uses(Path::new("/mnt/system")), "its /system/lib64 is the recovery's own");
-        assert!(!report.uses(Path::new("/vendor")));
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
+        let find = |path: &str| cfg.services.iter().find(|s| s.path == path).cloned().expect("listed");
+        // The weaver runs out of the odm partition and its libraries come from
+        // there too; the TEE's listener is the vendor partition's.
+        let weaver = find("/odm/bin/hw/android.hardware.weaver-service.thales");
+        assert!(weaver.uses(Path::new("/odm")));
+        assert!(!weaver.uses(Path::new("/odm_dlkm")), "a longer name is another partition");
+        assert!(weaver.uses(Path::new("/vendor/lib64")), "its libraries are there as well");
+        let listeners = find("/vendor/bin/qseecomd");
         assert!(listeners.uses(Path::new("/vendor")));
+        // The OMAPI service is the recovery's own, in the ramdisk.
+        let omapi = find("/system/bin/se_omapi");
+        assert!(!omapi.uses(Path::new("/mnt/system")), "its /system/lib64 is the recovery's own");
     }
 
     #[test]
@@ -1202,7 +1213,7 @@ mod tests {
         assert_eq!(aod.enter.len(), 1, "the driver's doze brightness is set before the panel dozes");
         assert_eq!((aod.enter[0].id, aod.enter[0].value.as_str()), (3, "1"));
         assert_eq!(aod.node, "/proc/mi_display/tx_cmd_set_prim");
-        let base = include_str!("../../../devices/ishtar.toml");
+        let base = "[device]\ncodename = \"x\"\n";
         assert!(DeviceConfig::parse(base).unwrap().aod.is_none(), "a phone that names none blanks the ordinary way");
         assert!(DeviceConfig::parse(&format!("{base}\n[aod]\nenter_cmds = [45]\n")).is_err(), "no way back out");
         assert!(DeviceConfig::parse(&format!("{base}\n[aod]\nleave_cmds = [18]\n")).is_err(), "no way in");
@@ -1217,14 +1228,8 @@ mod tests {
     fn the_phone_whose_panel_lights_on_two_taps_names_it() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/haotian.toml")).unwrap();
         assert!(cfg.touch.double_tap, "two taps on its dark panel light it");
-        for other in ["nezha", "ishtar", "fuxi", "nuwa"] {
-            let text = std::fs::read_to_string(format!("devices/{other}.toml"));
-            let Ok(text) = text else { continue };
-            let cfg = DeviceConfig::parse(&text).unwrap();
-            assert!(!cfg.touch.double_tap, "{other} was left as it was: its power key lights the panel");
-        }
         // A phone that names nothing lights only by its power key.
-        let none = format!("{base}\n", base = include_str!("../../../devices/ishtar.toml"));
+        let none = "[device]\ncodename = \"x\"\n";
         assert!(!DeviceConfig::parse(&none).unwrap().touch.double_tap);
         let set = format!("{none}\n[touch.double_tap]\n");
         assert!(DeviceConfig::parse(&set).is_err(), "the flag is a word of [touch], not a table of its own");

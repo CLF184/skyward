@@ -1,10 +1,11 @@
 ![Skyward Recovery](assets/hero.jpg)
 
-# Skyward
+# Skyward for the Xiaomi 15 Pro
 
 English | [简体中文](README.zh-CN.md)
 
-Skyward is a recovery written in Rust, from scratch.
+Skyward is a recovery written in Rust, from scratch. This fork is built for one
+phone: **Xiaomi 15 Pro (`haotian`)**, on the Chinese system's OS4.0.0.19.
 
 <p align="center">
   <img src="assets/home.png" width="30%" alt="Home">
@@ -12,16 +13,43 @@ Skyward is a recovery written in Rust, from scratch.
   <img src="assets/time-zone.png" width="30%" alt="Time zone">
 </p>
 
+## What this fork adds to upstream
+
+Upstream Skyward is a multi-device recovery. This fork keeps its own
+`devices/haotian.toml` only, and adds what decrypting this phone's data
+partition turned out to need:
+
+- **The weaver answers, so a data partition that is only weaver-bound opens.**
+  A phone whose secret is guarded by the secure element's weaver reaches it
+  through three things a recovery does not run by itself, and all three are now
+  started or loaded by Skyward:
+  - `ssgtzd`, the TEE's mink daemon. Without it the secure element's
+    `TEEC_OpenSession` returns `0xFFFF0000` and the element never opens.
+  - `stm_st54se_gpio` and `stm_nfc_i2c`, so `/dev/st54spi_gpio` exists at all.
+  - The secure element's HAL as `root`, after the ADSP is up.
+- **Two taps light the dark panel**, as the phone's own system's double tap
+  does. The phone stays awake while the panel is off, since a suspended phone
+  is one the touchscreen cannot report a tap to.
+- **The ADSP is given three seconds, then asked for a retry.** On a build whose
+  `/vendor/firmware` carries only the first part of the DSP's firmware, the
+  kernel stops at the first missing segment; Skyward asks the loader again once
+  the modem partition is shown at `/firmware`, which is the last folder the
+  kernel's own firmware search looks in.
+
 ## Features
 
 ### Implemented
 
-- Decrypt the data partition with the screen lock's credential
-- Install zips, system update packages and partition images, from internal storage, a USB drive or adb sideload
-- `7za` and `zstd` for install scripts, which ROMs with a super image compressed by zstd use to flash it, and an `unzip` whose `-p` streams the image as it reads it
-- `avbctl` and `resetprop` for install scripts, to turn off verified boot's checks and to read and set properties
+- Decrypt the data partition with the screen lock's credential, including users
+  whose secret is bound to the weaver and has no `secdis` fallback
+- Install zips, system update packages and partition images, from internal
+  storage, a USB drive or adb sideload
+- `7za` and `zstd` for install scripts, and an `unzip` whose `-p` streams the
+  image as it reads it
+- `avbctl` and `resetprop` for install scripts
 - Online system updates
-- Virtual A/B updates: read where an update's snapshots stand, map the partitions through them, and merge them back into the partitions they snapshot, as the system's own recovery does
+- Virtual A/B updates: read where an update's snapshots stand, map the
+  partitions through them, and merge them back
 - Skyward's own updates, from its newest release on GitHub
 - Backup and restore
 - Wipe data and factory reset
@@ -30,182 +58,150 @@ Skyward is a recovery written in Rust, from scratch.
 - WLAN
 - MTP file transfer, adb and fastbootd
 - Reboot to system, recovery, fastboot, bootloader or EDL, and switch slots
-- Dual boot: a second system beside the installed one, its files in the data partition, picked from two cards on the home page's Dual boot and switched to with a swipe
+- Dual boot: a second system beside the installed one, picked from two cards on
+  the home page and switched to with a swipe
 - Light and dark themes; Simplified Chinese, Traditional Chinese and English
 
 ### Not implemented
 
-- Updates whose snapshots are compressed and served by snapuserd: this recovery maps and merges kernel snapshots only, so an update of that kind merges in the system, once it starts
-- Incremental update packages, which would ask the recovery to make snapshots of its own on a Virtual A/B phone
+- Updates whose snapshots are compressed and served by `snapuserd`: this
+  recovery maps and merges kernel snapshots only
+- Incremental update packages
 - Update packages for phones without A/B slots
-- Vibration on the Xiaomi 15 Pro, whose motor's driver asks the kernel for a power state a recovery has not set up; see the note on that phone below
-- On the phones under construction below, decryption of the data partition, which has not been brought up on them yet
-
-## Notes on the Xiaomi 15 Pro
-
-`haotian` has been tried on the phone, and these work there: the screen, the
-touchscreen, adb and fastbootd, MTP, and decrypting the data partition with
-the screen lock's credential. Vibration does not, because the motor's driver
-asks the kernel for a power state a recovery has not set up; the driver's
-modules carry no parameter that would change that.
-
-The stock build the image is made on is OS4.0.0.19.XOBCNXM.
 
 ## Supported devices
 
-| Device | Codename | Tested system version |
-| --- | --- | --- |
-| Xiaomi 17 Ultra | `nezha` | OS4.0.4.0.XPACNXM (Android 17) |
-| Xiaomi 13 Ultra | `ishtar` | OS3.0.308.0.WMACNXM (Android 16) |
+| Device | Codename | Built on | Tested |
+| --- | --- | --- | --- |
+| Xiaomi 15 Pro | `haotian` | OS4.0.0.19.XOBCNXM (Android 17) | yes |
 
-### 🚧 Under construction
+## Notes on the Xiaomi 15 Pro
 
-These images are built from each phone's stock firmware and have not been tried
-on the phone. They set up the screen, touch, WLAN and vibration, and do not decrypt
-the data partition.
+These have been tried on the phone and work: the screen (including its subpixel
+rendering, which this panel leaves to the display controller), the touchscreen
+and its double tap, adb and fastbootd, MTP, the motor, WLAN, and decrypting the
+data partition with the screen lock's credential.
 
-| Device | Codename | Built on |
-| --- | --- | --- |
-| 🚧 Xiaomi 13 | `fuxi` | OS3.0.309.0.WMCCNXM (Android 16) |
-| 🚧 Xiaomi 13 Pro | `nuwa` | OS3.0.312.0.WMBCNXM (Android 16) |
-| 🚧 Xiaomi 14 | `houji` | OS3.0.307.0.WNCCNXM (Android 16) |
-| 🚧 Xiaomi 14 Pro | `shennong` | OS3.0.309.0.WNBCNXM (Android 16) |
-| 🚧 Xiaomi 14 Ultra | `aurora` | OS3.0.308.0.WNACNXM (Android 16) |
-| 🚧 Xiaomi 15 | `dada` | OS3.0.307.0.WOCCNXM (Android 16) |
-| 🚧 Xiaomi 15 Pro | `haotian` | OS3.0.309.0.WOBCNXM (Android 16) |
-| 🚧 Xiaomi 15 Ultra | `xuanyuan` | OS3.0.314.0.WOACNXM (Android 16) |
-| 🚧 Xiaomi 17 | `pudding` | OS4.0.4.0.XPCCNXM (Android 17) |
-| 🚧 Xiaomi 17 Pro | `pandora` | OS4.0.4.0.XBLCNXM (Android 17) |
-| 🚧 Xiaomi 17 Pro Max | `popsicle` | OS4.0.4.0.XPBCNXM (Android 17) |
-| 🚧 Xiaomi 17 Max | `byron` | OS3.0.310.0.WAFCNXM (Android 16) |
-| 🚧 REDMI K80 | `zorn` | OS3.0.309.0.WOKCNXM (Android 16) |
-| 🚧 REDMI K80 Pro | `miro` | OS3.0.305.0.WOMCNXM (Android 16) |
-| 🚧 REDMI K90 | `annibale` | OS3.0.307.0.WPKCNXM (Android 16) |
-| 🚧 REDMI K90 Pro Max | `myron` | OS4.0.4.0.XPMCNXM (Android 17) |
-| 🚧 REDMI K90 Ultra | `warsaw` | OS3.0.309.0.WHPCNXM (Android 16) |
-| 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM (Android 17) |
-| 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM (Android 17) |
+The stock build the image is made on is OS4.0.0.19.XOBCNXM.
+
+### If decryption still fails
+
+The kernel log says which of the three walls was hit. Look for the line
+`the blob the phone records is bound to a weaver; the blobs beside it are …`,
+then:
+
+- `the phone's weaver cannot answer` — the transport: `ssgtzd`, the eSE's
+  drivers, or the secure element's HAL.
+- `the secure element does not recognise that credential` — the credential.
+- `the secure element is holding off further tries` — the element's own
+  throttling, after repeated wrong tries.
+
+If the DSP is the fault, the kernel log carries `the ADSP is offline; asked the
+loader again now that /firmware is in place`, followed by either a running DSP
+or `it is not running, even after the loader was asked again`.
 
 ## Installing
 
-Skyward needs an unlocked bootloader. Download the zip for your phone from
-[Releases](https://github.com/kirklin/skyward/releases), where each shows as the
-phone's model and codename, such as Xiaomi 17 Ultra (nezha). Check it against
-`SHA256SUMS`, unzip it, and flash the image inside to the recovery partition of
-the slot the phone runs from, with the phone in fastboot mode:
+Skyward needs an unlocked bootloader. Download the image from
+[Releases](https://github.com/Rinrroy/skyward-for-haotian/releases), check it
+against `SHA256SUMS`, and flash it to the recovery partition of the slot the
+phone runs from, with the phone in fastboot mode:
 
 ```sh
-unzip skyward-v0.2.0-nezha-OS4.0.4.0.XPACNXM.zip
-fastboot flash recovery skyward-v0.2.0-nezha-OS4.0.4.0.XPACNXM.img
+sha256sum --check SHA256SUMS
+fastboot flash recovery skyward-v0.2.1-haotian-OS4.0.0.19.XOBCNXM.img
 fastboot reboot recovery
 ```
 
 Afterwards Skyward updates itself over Wi-Fi from its newest release, on the
-Skyward update page in Settings; a newer image, unzipped, also installs from its own
-Install page. With **Flash Skyward again** on, a system update or zip that writes
-over the recovery partitions gets Skyward back in them.
+Skyward update page in Settings; a newer image also installs from its own
+Install page. With **Flash Skyward again** on, a system update or zip that
+writes over the recovery partitions gets Skyward back in them.
 
 Without a system in super, Skyward still starts, with its screen and keys, adb,
-`adb sideload` and fastbootd, enough to install one. Touch, WLAN and decryption run
-from the installed system and come back with it.
+`adb sideload` and fastbootd, enough to install one. Touch, WLAN and decryption
+run from the installed system and come back with it.
 
 adb in Skyward is a root shell that needs no authorization on the phone: anyone
 with the phone and a cable can reach its storage while it is in recovery.
 
 ## Dual boot
 
-Skyward installs a second system beside the one in the phone's own partitions,
-whether that is HyperOS or a custom ROM, and switches between them from **Dual boot**
-on its home page. The second system's root is a file in the data partition that the
-filesystem may neither move nor delete, read and written through the partition
-itself; the boot images of both systems are kept in another such file. A switch
-writes only the boot and init_boot partitions of the slot that starts next, and
-keeps each step on /metadata first, so a switch cut off by a loss of power is
-finished when Skyward next starts. vendor_boot, dtbo, recovery, vbmeta, the firmware
-and super stay as they are, and the second system starts with the installed
-system's vendor_boot and dtbo.
+Skyward installs a second system beside the one in the phone's own partitions
+and switches between them from **Dual boot** on its home page. The second
+system's root is a file in the data partition that the filesystem may neither
+move nor delete, read and written through the partition itself; the boot images
+of both systems are kept in another such file. A switch writes only the boot and
+init_boot partitions of the slot that starts next, and keeps each step on
+`/metadata` first, so a switch cut off by a loss of power is finished when
+Skyward next starts. vendor_boot, dtbo, recovery, vbmeta, the firmware and super
+stay as they are.
 
-Before anything else writes the boot partitions, Skyward puts the installed system's
-boot images back: an install, a slot switch, fastboot, a factory reset, and a backup
-or restore of the boot partitions. The second system waits while a system update is
-still to be merged, and backups of the data partition leave it out.
-
-A second system installs from a zip on the Install page, as any other package does:
+A second system installs from a zip on the Install page:
 
 | File | What it holds |
 | --- | --- |
-| `system.toml` | `id`, `name`, `version` and `filesystem`; `init`, the program the root starts with, `/sbin/init` unless given; `minimum`, the least room the root takes, in bytes |
+| `system.toml` | `id`, `name`, `version` and `filesystem`; `init`; `minimum`, the least room the root takes |
 | `boot.img` | The kernel the bootloader starts |
-| `rootfs.img` | The root filesystem's image, of the `filesystem` named |
+| `rootfs.img` | The root filesystem's image |
 | `init_boot.img` | Only for a system with a first ramdisk of its own |
 
-A system without an init_boot image of its own starts from one Skyward makes. Its
-program loads the installed system's first-stage kernel modules the way that
-system's first stage loads them, with their soft dependencies and the settings the
-kernel command line gives them, finds the root in the data partition, mounts it and
-starts `init` there. If anything stops it, it brings Skyward up, as a failed start
-of the installed system ends in the recovery: it leaves the reason in misc, unpacks
-the ramdisk of the slot's recovery partition over its own, as the kernel unpacks it
-when the bootloader starts the recovery, and hands over to Skyward's first program,
-so Skyward comes up however the bootloader treats a restart. Skyward shows why, and
-the second system still starts next until the user switches on Dual boot. A start
-that stops moving restarts into the recovery instead, and a phone restarted before
-the hand-over finds the same request in misc at its next start, which brings
-Skyward up before anything else. Where Skyward comes up neither way, the phone stays
-where it stopped, and never starts the same again and again. A system with a first
-ramdisk of its own finds Skyward's program at `/skyward/map`, which lays the root
-out as a block device and prints its node. Each switch to the second system writes
-its init_boot image with the program of the Skyward that switches, so an updated
-Skyward starts it with the new program.
-
-A running system switches by writing `boot-recovery` with
-`--switch_system=installed`, or `--switch_system=` and the second system's `id`, to
-misc, and restarting into recovery. Where the bootloader starts the slot again, as
-the 13 Ultra's can with a USB cable in, Skyward's program finds the request in misc
-at the next start and brings Skyward up before anything else.
+A system without an init_boot image of its own starts from one Skyward makes: a
+statically linked program that loads the installed system's first-stage kernel
+modules, finds the root in the data partition, mounts it and starts `init`
+there. If anything stops it, it brings Skyward up instead, with the reason.
 
 ## Building
 
 Skyward builds with the stable Rust that `rust-toolchain.toml` names, with its
-`aarch64-linux-android` target, the Android NDK r29 and
-[cargo-ndk](https://github.com/bbqsrc/cargo-ndk). The recovery service is built for
-the phone, and the packer for the computer:
+`aarch64-linux-android` target, the Android NDK and
+[cargo-ndk](https://github.com/bbqsrc/cargo-ndk). The recovery service and the
+second system's first program are built for the phone, and the packer for the
+computer:
 
 ```sh
 cargo ndk -t arm64-v8a --platform 30 build --release -p skyward
+RUSTFLAGS="-C target-feature=+crt-static" cargo ndk -t arm64-v8a --platform 30 build --release -p skyward-system-init --target-dir target/system-init
 cargo build --release -p skyward-pack
 ```
 
-The second system's first program runs before any library is there to load, so it
-is built as a static program:
-
-```sh
-RUSTFLAGS="-C target-feature=+crt-static" cargo ndk -t arm64-v8a --platform 30 build --release -p skyward-system-init --target-dir target/system-init
-```
-
 The packer takes the stock recovery partition out of the build's full update
-package on Xiaomi's server, reading only the part of the package the partition is
-in, and checks its SHA-256 against the device file:
+package on Xiaomi's server, reading only the part of the package the partition
+is in, and checks its SHA-256 against the device file:
 
 ```sh
-target/release/skyward-pack stock --config devices/nezha.toml --out target/stock/nezha/recovery.img
+target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img
+target/release/skyward-pack stock --config devices/haotian.toml --out target/stock/haotian/recovery.img --partition odm
 ```
 
 Then it builds the image on top of it:
 
 ```sh
 target/release/skyward-pack recovery \
-  --stock target/stock/nezha/recovery.img \
+  --stock target/stock/haotian/recovery.img \
   --binary target/aarch64-linux-android/release/skyward \
   --system-init target/system-init/aarch64-linux-android/release/system-init \
-  --config devices/nezha.toml \
+  --config devices/haotian.toml \
   --font resources/fonts/MiSansVF.ttf \
   --mono resources/fonts/KirkMono-Regular.ttf \
   --mono-license resources/fonts/KirkMono-OFL.txt \
-  --out target/skyward-nezha.img
+  --firmware cs40l26.wmfw=stock/firmware/cs40l26.wmfw \
+  --firmware cs40l26.bin=stock/firmware/cs40l26.bin \
+  --firmware cs40l26-svc.bin=stock/firmware/cs40l26-svc.bin \
+  --firmware cs40l26-dvl.bin=stock/firmware/cs40l26-dvl.bin \
+  --firmware cs40l26-dbc.bin=stock/firmware/cs40l26-dbc.bin \
+  --firmware cs40l26-a2h.bin=stock/firmware/cs40l26-a2h.bin \
+  --omapi resources/omapi \
+  --out target/skyward-haotian.img
 ```
 
-Tests and lints run on the computer; what runs only on the phone is linted for it:
+The motor's firmware has to be in the ramdisk before init's first probe, and
+`--omapi` puts in the OMAPI service the Thales weaver reaches the secure element
+through. `.github/workflows/build-haotian.yml` does all of this on a tag and
+publishes the image with its checksum.
+
+Tests and lints run on the computer; what runs only on the phone is linted for
+it:
 
 ```sh
 cargo test --workspace
@@ -213,14 +209,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -p skyward-systems -p skyward-system-init -- -D warnings
 ```
 
-`skyward-preview` draws the pages on the computer, as PNG files, without a phone:
-each page whole, as a long screenshot shows it, in the states it can be in, and the
-screen at moments of touches and motion. `--lang` picks the language by a locale
-such as `en` or `zh-TW`:
+A Windows host can cross-compile the phone's side and run the tests for
+`skyward-config`, but neither packs an image (`skyward-bootimg` uses unix-only
+calls) nor builds `skyward-ui`'s tests (`rsproperties` does not build there).
+Use Linux or CI for those.
+
+`skyward-preview` draws the pages on the computer, as PNG files, without a
+phone. `--lang` picks the language by a locale such as `en` or `zh-TW`:
 
 ```sh
 cargo run --release -p skyward-preview -- target/preview --lang en
 ```
+
+## Reading this repo
+
+`AGENT.md` is the working notes: what each part costs to learn, the rules a
+diagnostic has to keep, and — for this phone — why the weaver, the ADSP and the
+panel behave the way they do. Commit messages explain *why*, often at length.
 
 ## License
 
