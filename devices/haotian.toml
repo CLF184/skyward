@@ -25,7 +25,14 @@ corner_radius = 140
 sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
 # The touchscreen: Synaptics TouchComm over SPI behind Xiaomi's touch
 # layer, the one touch driver the phone's own modules.load lists.
-load = ["synaptics_tcm2"]
+#
+# The secure element: the Thales weaver reads and writes the slots that
+# guard a lock-screen secret through the eSE, and the eSE's driver is the
+# /dev/st54spi_gpio node from stm_st54se_gpio, with the NFC controller's
+# I2C driver beside it. YARP loads them in recovery for the same reason;
+# without them the eSE HAL answers "eseGetVendorId: Unknown eSE HW" and
+# the weaver's transport has no element to reach.
+load = ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]
 
 # As on the 17 Ultra, no init script of the phone's starts touch_report:
 # the touch feature service turns the controller's raw frames into
@@ -78,7 +85,27 @@ sockets = [{ name = "notify-topology", kind = "stream", mode = 0o660, user = "sy
 user = "root"
 groups = ["root", "drmrpc"]
 
-# 2. TEE 应用加载器
+# 2. TEE 的 mink 通道
+# The TEE's own IPC: a trustlet that waits for a mink service has its session
+# refused until one is listening, and the secure element's trusted app is one
+# of them. The phone's own init starts ssgtzd for that at early-boot and gives
+# it the two listeners; without it the eSE HAL's TEEC_OpenSession comes back
+# 0xFFFF0000, so the element never opens, se_omapi finds no card, and every
+# call to the weaver answers with its own error 1 - which is what this phone
+# did. Nothing registers with the service directory: what listens is a socket,
+# and the programs after it are the ones that use it.
+[[service]]
+path = "/vendor/bin/ssgtzd"
+libraries = ["/system/lib64", "/vendor/lib64"]
+sockets = [
+    { name = "ssgtzd", kind = "stream", mode = 0o660, user = "system", group = "oem_2912" },
+    { name = "ssgtzd_opener", kind = "stream", mode = 0o660, user = "system", group = "system" },
+]
+user = "system"
+groups = ["system", "oem_2912", "wakelock"]
+capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
+
+# 3. TEE 应用加载器
 # This daemon asks for ANDROID_SOCKET_hlos_mink_opener, the listener its init
 # service creates. Without that descriptor it exits at once, leaving every
 # service that talks to the TEE unable to start.
@@ -90,7 +117,7 @@ user = "system"
 groups = ["system"]
 capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
 
-# 3. KeyMint 密钥服务
+# 4. KeyMint 密钥服务
 # The binary is the one this build carries: the phone has no
 # android.hardware.security.onekeymint-service-qti, which other Xiaomi builds
 # of the same chip do. Its init script runs it as system in system and
@@ -107,7 +134,7 @@ registers = [
 user = "system"
 groups = ["system", "drmrpc"]
 
-# 4. Gatekeeper 凭证验证服务
+# 5. Gatekeeper 凭证验证服务
 # Not the Rust one: this build ships the C one, run as root as the phone's own
 # recovery runs it. libqtigatekeeper is in the vendor partition's hw folder,
 # where the phone keeps the half of a HAL that its own init script adds to the
@@ -126,7 +153,7 @@ ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
 user = "root"
 groups = ["system"]
 
-# 5. 安全元件服务
+# 6. 安全元件服务
 # The phone's secure element is Qualcomm's, and it registers one service for
 # each of SIM1, SIM2 and eSE1. There is no Goodix one on this build, and no
 # description file of the name the earlier configuration named. libEseUtils
@@ -148,7 +175,7 @@ registers = [
 user = "root"
 groups = ["root", "nfc"]
 
-# 5b. OMAPI
+# 7. OMAPI
 # The Thales weaver reaches the secure element through
 # android.se.omapi.ISecureElementService/default, which system_server serves
 # on Android. se_omapi, packed into the ramdisk with its description, serves
@@ -162,7 +189,7 @@ ready_service = "android.se.omapi.ISecureElementService/default"
 user = "root"
 groups = ["root", "system"]
 
-# 6. Weaver 服务
+# 8. Weaver 服务
 # Thales' weaver, run as vendor_thales_weaver in that group, system and
 # drmrpc, as its init script on the odm partition has it.
 [[service]]
