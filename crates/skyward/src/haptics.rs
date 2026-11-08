@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // linux/input-event-codes.h
 const EV_FF: u16 = 0x15;
@@ -24,12 +24,25 @@ const NOMINAL_HZ: f32 = 172.4;
 /// the click is taken away once this has passed.
 const NOMINAL_CLICK: Duration = Duration::from_millis(30);
 
+/// How strongly the phone's own system plays the two ticks of the screen
+/// going off, whatever the slider says.
+const TICKS_STRENGTH: f32 = 0.415;
+
+/// How long between the two ticks.
+const TICK_GAP: Duration = Duration::from_millis(55);
+
+/// How much lighter the second tick is than the first.
+const TICK_SECOND: f32 = 0.79;
+
 /// The vibration motor, played through the kernel's force-feedback events.
 /// Each click is loaded as it is played, at the strength the slider gives,
 /// and taken away once it has run.
 pub struct Haptics {
     dev: File,
     click: Click,
+    /// What the two ticks of the screen going off are made of: swings at the
+    /// motor's own frequency, whatever the click is.
+    ticks: Click,
     strength: Strength,
     /// The click playing, by its slot and its count, until it is taken
     /// away; a click taken away early by the next is not taken away again.
@@ -38,6 +51,7 @@ pub struct Haptics {
 }
 
 /// What a click is.
+#[derive(Clone, Copy)]
 enum Click {
     /// A waveform the driver keeps, by its number: a bank and a number are
     /// handed over, and the driver plays that waveform.
@@ -53,39 +67,57 @@ impl Haptics {
     /// only as it is played.
     pub fn open(cfg: &skyward_config::Haptics) -> Result<Haptics> {
         let (path, dev) = motor()?;
-        let click = match (cfg.click, &cfg.resonance) {
-            (Some(id), _) => {
-                eprintln!("haptics {}: clicks with waveform {id}", path.display());
+        // A driver that says its motor's frequency nowhere, as Cirrus Logic's
+        // CS40L26 does not, still takes a click made for the frequency these
+        // motors swing at; the reason goes to the log and the motor is not
+        // left out over it.
+        let hz = match &cfg.resonance {
+            Some(file) => match resonance(file) {
+                Ok(hz) => hz,
+                Err(e) => {
+                    let _ = skyward_sys::kmsg(&format!("the motor's resonant frequency is not read, so {} Hz is used: {e:#}", NOMINAL_HZ));
+                    NOMINAL_HZ
+                }
+            },
+            None => NOMINAL_HZ,
+        };
+        let click = match cfg.click {
+            Some(id) => {
+                eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
                 Click::Kept(id)
             }
-            (None, Some(file)) => {
-                // A driver that says its motor's frequency nowhere, as
-                // Cirrus Logic's CS40L26 does not, still takes a click made
-                // for the frequency these motors swing at; the reason goes
-                // to the log and the motor is not left out over it.
-                let hz = match resonance(file) {
-                    Ok(hz) => hz,
-                    Err(e) => {
-                        let _ = skyward_sys::kmsg(&format!("the motor's resonant frequency is not read, so {} Hz is used: {e:#}", NOMINAL_HZ));
-                        NOMINAL_HZ
-                    }
-                };
-                eprintln!("haptics {}: clicks made for a motor swinging at {hz} Hz", path.display());
+            None => {
+                eprintln!("haptics {}: clicks and ticks made for a motor swinging at {hz} Hz", path.display());
                 Click::Made(hz)
             }
-            (None, None) => unreachable!("the configuration names a click of one kind"),
         };
-        Ok(Haptics { dev, click, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+        Ok(Haptics { dev, click, ticks: Click::Made(hz), strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
     }
 
     /// One short click at the strength the slider's `position` gives, after
     /// taking away one still playing. Gives how long it plays.
     pub fn click(&mut self, position: f32) -> Result<Duration> {
+        self.start(self.click, share(&self.strength, position))
+    }
+
+    /// The two ticks of the screen going off, as strongly as the phone's own
+    /// system plays them whatever the slider says, the second lighter. Gives
+    /// how long they take.
+    pub fn ticks(&mut self) -> Result<Duration> {
+        let first = self.start(self.ticks, TICKS_STRENGTH)?;
+        std::thread::sleep(TICK_GAP);
+        let second = self.start(self.ticks, TICKS_STRENGTH * TICK_SECOND)?;
+        Ok(first + TICK_GAP + second)
+    }
+
+    /// Play `click` at `share` of its full strength, after taking away what
+    /// still plays, and take it away again once it has run out.
+    fn start(&mut self, click: Click, share: f32) -> Result<Duration> {
         let mut playing = self.playing.lock().expect("no thread panics while it holds the click playing");
         if let Some((slot, _)) = playing.take() {
             erase(&self.dev, slot).context("take away the click still playing")?;
         }
-        let loaded = upload(&self.dev, &self.click, share(&self.strength, position)).context("load the click")?;
+        let loaded = upload(&self.dev, &click, share).context("load the click")?;
         play(&mut self.dev, loaded.slot).context("play the click")?;
         self.clicks += 1;
         let this = (loaded.slot, self.clicks);
@@ -93,8 +125,10 @@ impl Haptics {
         drop(playing);
         let dev = self.dev.try_clone().context("share the motor")?;
         let (playing, length) = (self.playing.clone(), loaded.length);
+        // Timed from now: a thread may wait a while before it first runs.
+        let until = Instant::now() + length;
         std::thread::spawn(move || {
-            std::thread::sleep(length);
+            std::thread::sleep(until.saturating_duration_since(Instant::now()));
             let mut playing = playing.lock().expect("no thread panics while it holds the click playing");
             if *playing == Some(this) {
                 *playing = None;
@@ -107,15 +141,20 @@ impl Haptics {
     }
 }
 
-/// Play the configured click once at the slider's `position`, saying how
-/// strongly and for how long, for trying out a motor.
-pub fn probe(cfg: &skyward_config::Haptics, position: f32) -> Result<()> {
+/// Play the configured click once at the slider's `position`, or else the
+/// ticks of the screen going off, saying how strongly and for how long, for
+/// trying out a motor.
+pub fn probe(cfg: &skyward_config::Haptics, position: f32, ticks: bool) -> Result<()> {
     let mut haptics = Haptics::open(cfg)?;
-    let length = haptics.click(position)?;
-    // Once it has played out, the click goes with the device as the
+    let (what, strength, length) = if ticks {
+        ("ticks", TICKS_STRENGTH, haptics.ticks()?)
+    } else {
+        ("click", share(&cfg.strength, position), haptics.click(position)?)
+    };
+    // Once it has played out, what played goes with the device as the
     // command ends.
     std::thread::sleep(length);
-    println!("played the click at {:.3} of its full strength, {} ms long", share(&cfg.strength, position), length.as_millis());
+    println!("played the {what} at {strength:.3} of the full strength, {} ms long", length.as_millis());
     Ok(())
 }
 

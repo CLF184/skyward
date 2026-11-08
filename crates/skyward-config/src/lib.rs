@@ -18,11 +18,12 @@ pub mod ramdisk {
     /// The recovery service binary init starts.
     pub const RECOVERY: &str = "system/bin/recovery";
     /// The commands install scripts written for other recoveries run that
-    /// Skyward answers itself: 7za and zstd, which a stock recovery does not
-    /// carry, and unzip, whose stock version holds all that `-p` takes out in
-    /// memory. Each is a link to the recovery service binary beside it, which
-    /// runs the command it is started as.
-    pub const COMMANDS: [&str; 3] = ["system/bin/7za", "system/bin/unzip", "system/bin/zstd"];
+    /// Skyward answers itself: 7za, avbctl, resetprop and zstd, which a
+    /// stock recovery does not carry, and unzip, whose stock version holds
+    /// all that `-p` takes out in memory. Each is a link to the recovery
+    /// service binary beside it, which runs the command it is started as.
+    pub const COMMANDS: [&str; 5] =
+        ["system/bin/7za", "system/bin/avbctl", "system/bin/resetprop", "system/bin/unzip", "system/bin/zstd"];
     /// The first property file init loads in recovery mode.
     pub const PROP_DEFAULT: &str = "prop.default";
     /// The scheduling profiles libprocessgroup reads.
@@ -200,9 +201,10 @@ pub struct Wipe {
 /// The data partition, which the folders erasing takes in are in.
 const DATA: &str = "/data";
 
-/// The vibration motor's click, played through the kernel's force-feedback
-/// events: a waveform its driver keeps, or one made from samples at the
-/// motor's resonant frequency, which the driver plays as they are given.
+/// The vibration motor, played through the kernel's force-feedback events:
+/// its click, a waveform its driver keeps or one made from samples at the
+/// motor's resonant frequency, which the driver plays as they are given,
+/// and the ticks of the screen going off by the power key, made too.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Haptics {
     /// The driver's number for a click waveform it keeps, on phones whose
@@ -210,8 +212,11 @@ pub struct Haptics {
     #[serde(default)]
     pub click: Option<i16>,
     /// The file the driver says the motor's resonant frequency in, in
+    /// The file the motor's driver says its resonant frequency in, in
     /// tenths of a hertz whatever its label, on phones whose click is made
-    /// from samples.
+    /// for the motor's own frequency. A driver that says it nowhere, as
+    /// Cirrus Logic's CS40L26 does not, takes a click made at the nominal
+    /// frequency instead, which is why this may be left out.
     #[serde(default)]
     pub resonance: Option<String>,
     /// The kernel modules the motor's driver is in, which the recovery loads
@@ -562,6 +567,22 @@ fn default_module_sources() -> Vec<String> {
     vec!["vendor_boot".into(), "vendor_dlkm".into(), "vendor".into()]
 }
 
+/// The phone a device configuration is for, read on its own: the
+/// configuration a newer build of Skyward carries may hold what this build
+/// does not read.
+pub fn codename(text: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Named {
+        device: NamedDevice,
+    }
+    #[derive(Deserialize)]
+    struct NamedDevice {
+        codename: String,
+    }
+    let named: Named = toml::from_str(text).context("parse device config")?;
+    Ok(named.device.codename)
+}
+
 impl DeviceConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let p = path.as_ref();
@@ -626,14 +647,12 @@ impl DeviceConfig {
             ensure!(!aod.leave_cmds.is_empty(), "[aod] leave_cmds names no command set that brings the panel back out");
         }
         if let Some(haptics) = &cfg.haptics {
-            // A click is of one kind or the other, and a driver that keeps
-            // neither — Cirrus Logic's CS40L26 plays what it is handed and
-            // says its motor's frequency nowhere — names neither and takes a
-            // click made for the frequency these motors swing at.
-            ensure!(
-                !(haptics.click.is_some() && haptics.resonance.is_some()),
-                "[haptics] names either a waveform the driver keeps or the file it says the motor's resonant frequency in"
-            );
+            // A click is either a waveform the driver keeps or one made at
+            // the motor's own frequency, and a phone may name the frequency
+            // beside a kept waveform too, for the ticks the screen going off
+            // plays. A driver that says its motor's frequency nowhere, as
+            // Cirrus Logic's CS40L26 does not, names neither and takes a
+            // click made at the nominal frequency.
             if let Some(file) = &haptics.resonance {
                 ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
             }
@@ -754,22 +773,22 @@ mod tests {
     fn ishtar_clicks_with_a_waveform_its_driver_keeps() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
         let haptics = cfg.haptics.expect("the 13 Ultra has a motor");
-        assert_eq!((haptics.click, haptics.resonance), (Some(0), None));
+        assert_eq!((haptics.click, haptics.resonance.as_deref()), (Some(0), Some("/sys/class/qcom-haptics/lra_frequency_hz")));
         assert_eq!(haptics.strength, Strength { lightest: 0.5, strongest: 1.0 });
     }
 
     #[test]
     fn a_click_is_kept_or_made_and_its_strengths_rise() {
         let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\n{body}\n"));
-        let strength = "strength = { lightest = 0.25, strongest = 1.0 }";
+        let (strength, resonance) = ("strength = { lightest = 0.25, strongest = 1.0 }", "resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"");
         assert!(with(&format!("click = 0\n{strength}")).is_ok());
         assert!(with(&format!("resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"\n{strength}")).is_ok());
         assert!(with(strength).is_ok(), "a driver that keeps neither takes a made click at a nominal frequency");
-        assert!(with(&format!("click = 0\nresonance = \"/sys/f\"\n{strength}")).is_err(), "a click of both kinds");
+        assert!(with(&format!("click = 0\nresonance = \"/sys/f\"\n{strength}")).is_ok(), "a kept click beside the frequency its ticks are made at");
         assert!(with(&format!("resonance = \"sys/f\"\n{strength}")).is_err(), "a file named from nowhere");
-        assert!(with("click = 0").is_err(), "a click without its strengths");
+        assert!(with(resonance).is_err(), "a click without its strengths");
         for (lightest, strongest) in [(0.0, 0.5), (0.5, 0.5), (0.5, 0.25), (0.25, 1.5)] {
-            let s = format!("click = 0\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
+            let s = format!("{resonance}\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
             assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
         }
     }
@@ -1071,6 +1090,15 @@ mod tests {
         assert_eq!(cfg.services[6].ready_hardware_service.as_deref(), Some("android.hardware.boot@1.2::IBootControl/default"));
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
         assert!(cfg.backup.data_skipped.contains(&"vendor/tzstorage".to_string()));
+    }
+
+    #[test]
+    fn the_phone_is_read_from_a_configuration_this_build_cannot_read_whole() {
+        assert_eq!(codename(include_str!("../../../devices/ishtar.toml")).unwrap(), "ishtar");
+        let later = "[device]\ncodename = \"x\"\nab = \"no longer a switch\"\n[display]\nwidth = \"wide\"\n[aurora]\nnew = 1\n";
+        assert!(DeviceConfig::parse(later).is_err());
+        assert_eq!(codename(later).unwrap(), "x");
+        assert!(codename("[display]\nwidth = 1440\n").is_err(), "a configuration that names no phone");
     }
 
     #[test]
