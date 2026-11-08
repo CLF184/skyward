@@ -30,6 +30,7 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 - 连接 WLAN
 - MTP 文件传输、adb 和 fastbootd
 - 重启到系统、recovery、fastboot、bootloader 和 EDL，切换启动槽位
+- 双系统：在已安装的系统旁边安装第二系统，文件保存在 data 分区中；在首页“双系统”的两张卡片中选择，滑动即可切换
 - 浅色和深色模式，简体中文、繁体中文和英文
 
 ### 尚未实现
@@ -84,8 +85,8 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/kirklin/skyward/releases) 下载对应机型的 zip，每个文件都标有机型和代号，例如 Xiaomi 17 Ultra (nezha)。使用 `SHA256SUMS` 核对并解压之后，在手机处于 fastboot 模式的时候，把其中的镜像刷入当前运行槽位的 recovery 分区：
 
 ```sh
-unzip skyward-v0.1.6-nezha-OS4.0.4.0.XPACNXM.zip
-fastboot flash recovery skyward-v0.1.6-nezha-OS4.0.4.0.XPACNXM.img
+unzip skyward-v0.2.0-nezha-OS4.0.4.0.XPACNXM.zip
+fastboot flash recovery skyward-v0.2.0-nezha-OS4.0.4.0.XPACNXM.img
 fastboot reboot recovery
 ```
 
@@ -95,6 +96,25 @@ super 中没有系统的时候，Skyward 仍然可以启动：屏幕和按键、
 
 Skyward 中的 adb 是 root shell，手机上无需授权：手机处于 recovery 的时候，任何人拿到手机和数据线都能访问其中的存储。
 
+## 双系统
+
+Skyward 可以在手机自身分区中的系统旁边安装第二系统，主系统是 HyperOS 或者第三方 ROM 都可以，并在首页的“双系统”中切换。第二系统的根文件系统是 data 分区中的一个文件，文件系统不能移动或删除它，Skyward 直接通过分区读写其中的内容；两个系统的启动镜像保存在另一个这样的文件中。切换系统只改写下次启动槽位的 boot 和 init_boot 分区，每一步都先记录在 /metadata 中，切换过程中断电的话，Skyward 下次启动时会完成这次切换。vendor_boot、dtbo、recovery、vbmeta、固件和 super 都保持不变，第二系统使用主系统的 vendor_boot 和 dtbo 启动。
+
+其他操作写入启动分区之前，Skyward 会先把主系统的启动镜像写回：安装、切换启动槽位、fastboot、恢复出厂设置，以及备份或恢复启动分区。系统更新尚未合并的时候，暂不切换到第二系统；备份 data 分区的时候不包含第二系统。
+
+第二系统的安装包是 zip 文件，和其他安装包一样在“安装”页面安装：
+
+| 文件 | 内容 |
+| --- | --- |
+| `system.toml` | `id`、`name`、`version` 和 `filesystem`；`init` 是根文件系统中第一个运行的程序，默认为 `/sbin/init`；`minimum` 是根文件系统至少需要的空间，单位为字节 |
+| `boot.img` | bootloader 启动的内核 |
+| `rootfs.img` | 根文件系统的镜像，格式为 `filesystem` 指定的文件系统 |
+| `init_boot.img` | 只有自带第一阶段 ramdisk 的系统需要 |
+
+没有自带 init_boot 镜像的系统，从 Skyward 生成的 init_boot 镜像启动。其中的程序按照主系统第一阶段的方式加载第一阶段的内核模块，包括模块之间的软依赖和内核命令行中给模块的参数，然后在 data 分区中找到根文件系统，挂载之后运行其中的 `init`。启动过程中出现任何错误，这个程序都会进入 Skyward，和主系统启动失败时进入 recovery 一样：它在 misc 中留下原因，把当前槽位 recovery 分区中的 ramdisk 按照 bootloader 启动 recovery 时内核解包的方式解包到自己的 ramdisk 上，然后交给 Skyward 的第一个程序运行，所以无论 bootloader 怎样处理重启，都能进入 Skyward。Skyward 显示原因；用户在“双系统”中切换之前，下次启动的仍是第二系统。启动长时间没有进展时，这个程序改为重启到 recovery；交给第二系统之前手机重启的话，下次启动时它会在 misc 中看到同样的请求，先进入 Skyward。两种方式都无法进入 Skyward 时，手机停留在出错的地方，不会反复启动同一个系统。自带第一阶段 ramdisk 的系统可以运行 Skyward 放在 `/skyward/map` 的程序，它把根文件系统映射为块设备，并输出设备节点的路径。每次切换到第二系统，Skyward 都用自己带的程序写入第二系统的 init_boot 镜像，所以更新 Skyward 以后，第二系统也用新的程序启动。
+
+正在运行的系统也可以请求切换：在 misc 中写入 `boot-recovery` 和 `--switch_system=installed`，或者 `--switch_system=` 加上第二系统的 `id`，然后重启到 recovery。bootloader 仍然启动这个槽位的话（小米 13 Ultra 连着 USB 线时可能这样），Skyward 的程序会在下次启动时在 misc 中看到这个请求，先进入 Skyward。
+
 ## 构建
 
 Skyward 使用 `rust-toolchain.toml` 指定的稳定版 Rust 和它的 `aarch64-linux-android` 目标、Android NDK r29 和 [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) 构建。recovery 服务针对手机构建，打包工具针对电脑构建：
@@ -102,6 +122,12 @@ Skyward 使用 `rust-toolchain.toml` 指定的稳定版 Rust 和它的 `aarch64-
 ```sh
 cargo ndk -t arm64-v8a --platform 30 build --release -p skyward
 cargo build --release -p skyward-pack
+```
+
+第二系统启动时运行的第一个程序在任何动态库可用之前运行，因此构建为静态程序：
+
+```sh
+RUSTFLAGS="-C target-feature=+crt-static" cargo ndk -t arm64-v8a --platform 30 build --release -p skyward-system-init --target-dir target/system-init
 ```
 
 打包工具从小米服务器上这个版本的完整更新包中取出原厂 recovery 分区，只读取这个分区所在的部分，并且按照设备配置文件核对 SHA-256：
@@ -116,6 +142,7 @@ target/release/skyward-pack stock --config devices/nezha.toml --out target/stock
 target/release/skyward-pack recovery \
   --stock target/stock/nezha/recovery.img \
   --binary target/aarch64-linux-android/release/skyward \
+  --system-init target/system-init/aarch64-linux-android/release/system-init \
   --config devices/nezha.toml \
   --font resources/fonts/MiSansVF.ttf \
   --mono resources/fonts/KirkMono-Regular.ttf \
@@ -128,7 +155,7 @@ target/release/skyward-pack recovery \
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -- -D warnings
+cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -p skyward-systems -p skyward-system-init -- -D warnings
 ```
 
 `skyward-preview` 无需手机，在电脑上把页面绘制成 PNG 文件：每个页面完整绘制成长截图的样子，覆盖它可能处于的各种状态，另外还有触摸和动画过程中某些时刻的屏幕。`--lang` 按照地区代码选择语言，例如 `en` 或者 `zh-TW`：

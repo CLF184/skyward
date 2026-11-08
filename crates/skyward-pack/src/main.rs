@@ -7,11 +7,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 mod avb;
-mod image;
-mod ramdisk;
 
-use image::BootImage;
-use ramdisk::Ramdisk;
+use skyward_bootimg::{BootImage, Ramdisk};
 
 /// Builds Skyward recovery images from a device's own stock images.
 #[derive(Parser)]
@@ -56,6 +53,11 @@ enum Cmd {
         /// Skyward built for the device (aarch64-linux-android).
         #[arg(long)]
         binary: PathBuf,
+        /// The first program of a system installed beside the installed
+        /// one, skyward-system-init built for the device and linked
+        /// statically.
+        #[arg(long)]
+        system_init: PathBuf,
         /// The device configuration, devices/<codename>.toml.
         #[arg(long)]
         config: PathBuf,
@@ -134,7 +136,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, config, font, mono, mono_license, firmware, modules, omapi, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, firmware, modules, omapi, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
@@ -153,6 +155,9 @@ fn main() -> Result<()> {
             for command in paths::COMMANDS {
                 rd.link(command, recovery)?;
             }
+            // The second system's first program: it runs before any library
+            // is there to load, so it is given a place of its own.
+            put(&mut rd, paths::SYSTEM_INIT, 0o755, read(&system_init)?)?;
             put(&mut rd, paths::CONFIG, 0o644, read(&config)?)?;
             put(&mut rd, paths::FONT, 0o644, read(&font)?)?;
             put(&mut rd, paths::MONO, 0o644, read(&mono)?)?;
@@ -160,12 +165,12 @@ fn main() -> Result<()> {
             for file in firmware {
                 let (name, from) = file.split_once('=').with_context(|| "--firmware takes name=local-file")?;
                 ensure!(!name.is_empty() && !name.starts_with('/') && !name.contains(".."), "{name} is not a firmware name");
-                rd.add(&format!("lib/firmware/{name}"), 0o644, read(&PathBuf::from(from))?)?;
+                put(&mut rd, &format!("lib/firmware/{name}"), 0o644, read(&PathBuf::from(from))?)?;
             }
             for file in modules {
                 let (name, from) = file.split_once('=').with_context(|| "--module takes name.ko=local-file")?;
                 ensure!(name.ends_with(".ko") && !name.contains('/') && !name.contains(".."), "{name} is not a module name");
-                rd.add(&format!("lib/modules/{name}"), 0o644, read(&PathBuf::from(from))?)?;
+                put(&mut rd, &format!("lib/modules/{name}"), 0o644, read(&PathBuf::from(from))?)?;
             }
             // A stock ramdisk may run logd without any scheduling profiles,
             // and logd stops as soon as it cannot find the one it asks for.
