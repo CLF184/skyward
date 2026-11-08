@@ -414,7 +414,7 @@ CI (`.github/workflows/build-haotian.yml`) builds the image **and** runs
 Clippy is `-D warnings`, so an unused import or a needless borrow fails the
 build; `cargo fmt` habits matter.
 
-A release is a tag: `git push ssh://git@github.com/Rinrroy/skyward.git main v0.2.1`
+A release is a tag: `git push ssh://git@github.com/Rinrroy/skyward-for-haotian.git main v0.2.2`
 builds the same image and publishes it, with `SHA256SUMS` beside it, as a GitHub
 release named for the tag — the artifact a branch run leaves expires after
 thirty days, a release does not. Bump `[workspace.package] version` in
