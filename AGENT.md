@@ -274,6 +274,8 @@ only on the machine that measured it.
 `gatekeeper`, `keymaster`/`keymint`, the secure element and the weaver are
 started by Skyward itself from `[[service]]` entries in the device's toml —
 not by init, so the stock `.rc` files' `disabled`/`enable` rules do not apply.
+The same goes for the two programs the weaver's transport needs and no
+recovery's init runs: `ssgtzd` and the OMAPI service, both below.
 
 - **`gatekeeper` must run as `root`** on `haotian`. The stock rc says `system`,
   but that rc only applies once init has enabled the service by property;
@@ -281,12 +283,43 @@ not by init, so the stock `.rc` files' `disabled`/`enable` rules do not apply.
   `libqtigatekeeper` cannot be reached — every call comes back as *"the secure
   world took the credential but wrote no note for the key service"*. YARP runs
   it as root on the same phone.
-- A phone whose weaver is a **Thales** secure element reaches it only through
+- A phone whose weaver is a **Thales** secure element reaches it through
   Android's OMAPI service, which lives in `system_server` and which a recovery
-  does not run. `skyward-crypto/src/blobs.rs` handles this: HyperOS keeps a
-  second `spblob` bound to `secdis` beside the weaver-bound one, and the
-  recovery opens that instead whenever it is there. **The decisions there are
-  testable on a computer** — that module exists so that they are.
+  does not run. `skyward-crypto/src/blobs.rs` handles the phone that keeps a
+  second blob: HyperOS writes one bound to `secdis` beside the weaver-bound
+  one, and the recovery opens that instead whenever it is there. **The
+  decisions there are testable on a computer** — that module exists so that
+  they are.
+- **The weaver itself now answers, so a blob that is only weaver-bound opens
+  too.** Three things were missing on `haotian`, and each of them alone left
+  every call to the weaver answering with the service's own error 1:
+  - **`ssgtzd` must run.** The TEE's trusted apps wait for a mink service; with
+    none listening the secure element's `TEEC_OpenSession` returns
+    `0xFFFF0000`, so the element never opens and `se_omapi` reports
+    `isSecureElementPresent: 0`. The phone's own init starts it at early-boot
+    with the two listeners below; a recovery starts no such init, so
+    `devices/haotian.toml` starts it. Measured: killing it and letting the HAL
+    come up again brings "error 1" straight back.
+  - **The eSE's drivers must be in.** `/dev/st54spi_gpio` comes from
+    `stm_st54se_gpio.ko`, with `stm_nfc_i2c.ko` beside it; without them the HAL
+    logs `eseGetVendorId: Unknown eSE HW` and registers a reader with no card.
+    YARP loads both in recovery. They are in `[modules].load`.
+  - **The secure element's HAL runs as `root`**, as YARP's init runs it.
+- The **ADSP** is the other wall the same HAL hits, and it has two separate
+  faults worth telling apart. The kernel boots the DSP itself while the
+  modules load, so a phone whose firmware it can read says `running` within a
+  second and nothing has to be written. But **writing `boot_adsp/ssr` takes
+  the DSP down through `rproc_shutdown` and hangs the writer in the ADSP
+  driver's shutdown path** — the recovery process sat in `D` state in
+  `spf_core_exit` and the phone had to be forced out of recovery. Never write
+  `ssr`, and never `boot=0`. `boot=1` is the safe one: offline it reloads and
+  boots the DSP, and on a running one `rproc_boot()` returns early. The
+  recovery's firmware search ends with `/firmware/image`, a folder it makes by
+  showing the modem partition there, and on a phone whose `/vendor/firmware`
+  holds only the first part of the DSP's firmware (`adsp.b28` missing) that is
+  the only place the loader can still find the rest — so `main.rs` waits three
+  seconds and then asks the loader again by writing `boot_adsp/boot=1`, never
+  on a DSP that is already running.
 - A service's **VINTF description has to name a version the recovery's own
   `libvintf` knows**. `servicemanager` reads the whole folder and drops *every*
   description over one it cannot parse, so a single description written for a
@@ -309,8 +342,32 @@ not by init, so the stock `.rc` files' `disabled`/`enable` rules do not apply.
 - What the phone kept beside its blobs goes to the kernel log. When a weaver
   binding is involved, look for
   `the blob the phone records is bound to a weaver; the blobs beside it are …`
-  and check whether `secdis` is among them. Without it the user's files cannot
-  be opened in a recovery at all, and no code change will help.
+  and check whether `secdis` is among them. With the weaver answering (see
+  above) a blob that is only weaver-bound opens too; where it still does not,
+  the line that follows says which of the three walls was hit:
+  `the phone's weaver cannot answer` (the transport: `ssgtzd`, the eSE's
+  drivers, or the element's HAL), `the secure element does not recognise that
+  credential` (the credential), or `the secure element is holding off further
+  tries` (the element's own throttling, after repeated wrong tries).
+
+## Lighting the dark panel
+
+Only the power key lit it until 0.1.7. On the phone's own system the same panel
+lights on a double tap, and its controller keeps reporting fingers with the
+panel off, so the recovery has it too: `tap()` in `skyward-ui/src/app.rs`
+counts a tap only while the display is off, and the second one inside Android's
+own window (300 ms) and near enough to the first (8% of the screen's width)
+lights it. Neither tap works the page — they are one gesture. **A tap is in
+screen pixels, so the slop is multiplied by the width**; comparing it against
+`0.08` directly makes a double tap impossible, which is how it was first
+written.
+
+**A suspended phone cannot report a tap**, so a phone that names
+`double_tap = true` in `[touch]` keeps the phone awake while the panel is off —
+`may_sleep` in `skyward/src/ui.rs` is false for it. That is the price: the panel
+lights without the power key, and the phone does not sleep. Only `haotian` names
+it; a phone whose controller stops reporting fingers with its panel off has
+nothing for the feature to work with.
 
 ## USB and adb
 
@@ -333,6 +390,21 @@ The workspace is Android-only: it uses `std::os::unix`, `rustix` and Android
 binder. **A Windows host cannot build it** — `cargo check` fails in
 `rsproperties`/`skyward-block`/`skyward-lp` before reaching any of this code.
 Build with `cargo ndk` for `aarch64-linux-android`, or on Linux.
+
+On a Windows host the phone's binary can still be cross-compiled and the image
+packed, which is how the releases below were checked before CI:
+`cargo ndk -t arm64-v8a --platform 30 build --release -p skyward` (with
+`ANDROID_NDK_HOME` set), then `cargo build --release -p skyward-pack` and
+`skyward-pack recovery`. `skyward-ui`'s *tests* do not compile there either —
+they pull `rsproperties` in — so `cargo test -p skyward-config` and clippy on
+the Android target are what can be run locally; the rest is CI's.
+
+Two things the packer used to need and no longer does: it wrote the ramdisk's
+legacy LZ4 frames by running the `lz4` program, which a Windows host does not
+have (it now writes them itself with `lz4_flex`, and `repack` comparing the
+entry lists is the check that it does), and `DeviceConfig::parse` asked
+`Path::is_absolute()`, which is false for `/data/x` off Linux (it asks
+`has_root()` now).
 
 `skyward-preview` draws every page to PNG on any host, and `skyward-ui`'s tests
 run anywhere — that is the fast loop for anything about layout or wording.
