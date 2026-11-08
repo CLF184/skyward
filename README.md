@@ -50,7 +50,8 @@ partition turned out to need:
 - Online system updates
 - Virtual A/B updates: read where an update's snapshots stand, map the
   partitions through them, and merge them back
-- Skyward's own updates, from its newest release on GitHub
+- Skyward's own updates, from the newest release in
+  [this repository](https://github.com/Rinrroy/skyward-for-haotian/releases)
 - Backup and restore
 - Wipe data and factory reset
 - Mount partitions, repair and format filesystems
@@ -113,10 +114,16 @@ fastboot flash recovery skyward-v0.2.1-haotian-OS4.0.0.19.XOBCNXM.img
 fastboot reboot recovery
 ```
 
-Afterwards Skyward updates itself over Wi-Fi from its newest release, on the
-Skyward update page in Settings; a newer image also installs from its own
-Install page. With **Flash Skyward again** on, a system update or zip that
-writes over the recovery partitions gets Skyward back in them.
+Afterwards Skyward updates itself over Wi-Fi from the newest release **in this
+repository**, on the Skyward update page in Settings; a newer image also installs
+from its own Install page. With **Flash Skyward again** on, a system update or
+zip that writes over the recovery partitions gets Skyward back in them.
+
+The update page asks `api.github.com/repos/Rinrroy/skyward-for-haotian` for its
+newest release, and takes the asset named `skyward-<tag>-haotian-<stock>.img` —
+the image itself, published as it is rather than zipped. A fork of this fork has
+to change `skyward_net::github::LATEST` to its own repository, or the phone will
+be offered images built for `haotian` that it cannot use.
 
 Without a system in super, Skyward still starts, with its screen and keys, adb,
 `adb sideload` and fastbootd, enough to install one. Touch, WLAN and decryption

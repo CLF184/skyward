@@ -41,7 +41,7 @@ Skyward 是使用 Rust 从零编写的 recovery。本仓库是为**一台手机*
 - 刷机包的安装脚本可以使用 `avbctl` 关闭验证启动的校验，使用 `resetprop` 读写属性
 - 在线系统更新
 - Virtual A/B 更新：读取更新快照的状态，把分区映射到快照之上，再把快照合并回去
-- 从 GitHub 上的最新版本在线更新 Skyward
+- 从[本仓库](https://github.com/Rinrroy/skyward-for-haotian/releases)的最新版本在线更新 Skyward
 - 备份和恢复
 - 清除数据、恢复出厂设置
 - 挂载分区，修复和格式化文件系统
@@ -96,9 +96,14 @@ fastboot flash recovery skyward-v0.2.1-haotian-OS4.0.0.19.XOBCNXM.img
 fastboot reboot recovery
 ```
 
-之后 Skyward 可以在「设置」的更新页里通过 Wi-Fi 在线更新；新镜像也可以从它自己的
-「安装」页刷入。开启**再次刷入 Skyward** 后，写入 recovery 分区的系统更新或刷机包
-会把 Skyward 重新装回去。
+之后 Skyward 可以在「设置」的更新页里通过 Wi-Fi 从**本仓库**的最新版本在线更新；新镜像
+也可以从它自己的「安装」页刷入。开启**再次刷入 Skyward** 后，写入 recovery 分区的系统
+更新或刷机包会把 Skyward 重新装回去。
+
+更新页向 `api.github.com/repos/Rinrroy/skyward-for-haotian` 询问最新版本，取名为
+`skyward-<tag>-haotian-<stock>.img` 的资产——也就是镜像本身，直接以镜像发布，不再
+套一层 zip。若你要再开一个分支，请改 `skyward_net::github::LATEST` 指向自己的仓库，
+否则手机会被推给为 `haotian` 构建、但它用不了的镜像。
 
 super 里没有系统时 Skyward 仍能启动，有屏幕、按键、adb、`adb sideload` 和 fastbootd，
 足够装一个系统进去。触摸、WLAN 和解密都依赖已安装的系统，系统装好后即可用。
