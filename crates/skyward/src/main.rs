@@ -519,9 +519,12 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     // with it the weaver that guards a lock-screen secret. The kernel's own
     // remoteproc probe loads the DSP's firmware and boots it while init is
     // still running, so wait for it to say it is running before any service
-    // starts; do not write the boot switches, because on this phone they ask
-    // a running DSP to restart (the SSR one hangs the writer in the ADSP
-    // driver's shutdown path until the DSP is gone).
+    // starts, and where it could not start it, ask the loader again - the
+    // firmware it could not reach is on the modem partition, which is shown
+    // at /firmware by the mount above and is the last folder the loader
+    // looks in. Never write the SSR switch beside it: that takes the DSP
+    // down through rproc_shutdown, which hangs the writer in the ADSP
+    // driver's shutdown path until the DSP is gone.
     if let Err(e) = wait_for_adsp() {
         skyward_sys::kmsg(&format!("the ADSP is not running: {e:#}"))?;
     }
@@ -666,41 +669,76 @@ const FIRMWARE_SHOWN: &str = "/firmware";
 #[cfg(target_os = "android")]
 const REMOTEPROC: &str = "/sys/class/remoteproc";
 
-/// How long the DSP is given to say it is running once its firmware is in.
+/// How long the DSP is given to say it is running before it is asked for
+/// again, and after.
 ///
 /// Short on purpose. The kernel starts the DSP while the modules load, so a
-/// phone whose firmware it can read says running within a second. A phone
-/// whose firmware it cannot read - /vendor/firmware for the DSP is one
-/// segment short on some builds, and the loader then stops with
-/// "can't start rproc ...: -2" - never says it, and waiting longer only
-/// delays the pages: the weaver answers on such a phone with the DSP still
-/// offline, so the DSP is worth a moment and no more.
+/// phone whose firmware it can read says running within a second.
 #[cfg(target_os = "android")]
 const ADSP_READY: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Give the ADSP a moment to say the kernel started it. The secure element's
-/// HAL asks it for the element's vendor id, so a phone whose DSP is coming up
-/// is worth waiting for; one whose DSP will not come up at all still has to
-/// show its pages. The kernel's remoteproc probe loads the DSP's firmware and
-/// boots it while init is still running, so this only observes: writing the
-/// boot or SSR switch of a DSP that is already running asks for a restart,
-/// and on this phone the SSR write blocks in the ADSP driver's shutdown path
-/// until the DSP is gone.
+/// How long the DSP is given once the loader has been asked again.
+#[cfg(target_os = "android")]
+const ADSP_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The switch that has the phone's ADSP loader read the DSP's firmware and
+/// start it, which is what its own init writes as the modules come in.
+#[cfg(target_os = "android")]
+const ADSP_BOOT: &str = "/sys/kernel/boot_adsp/boot";
+
+/// Have the DSP started, or say why it is not.
+///
+/// The kernel reads the DSP's firmware while the modules are loading, and its
+/// search ends with `/firmware/image` - a folder the recovery makes by
+/// showing the modem partition there. On a phone whose `/vendor/firmware`
+/// carries only the first part of that firmware, the kernel takes what it
+/// finds there and stops at the first segment that is not: its own log reads
+/// "could not find firmware for adsp.b28 ... attempted /firmware/image/
+/// adsp.b28, open failed", and the DSP stays offline for the whole start.
+/// The rest of the firmware is on the modem partition. Nothing has to be
+/// copied for it: `/firmware` is in place by now, so asking the loader for
+/// another try is enough, and this is the switch its own init writes.
+///
+/// The switch is only written while the DSP is not running: written to one
+/// that is, it asks for a restart instead, and the SSR switch beside it takes
+/// the DSP down through rproc_shutdown, which blocks the writer in the ADSP
+/// driver's shutdown path until the DSP is gone. A phone whose DSP will not
+/// come up at all still shows its pages.
 #[cfg(target_os = "android")]
 fn wait_for_adsp() -> Result<()> {
-    let asked = std::time::Instant::now();
-    while asked.elapsed() < ADSP_READY {
-        if let Some(adsp) = adsp()? {
-            if adsp_running(&adsp)? {
-                return skyward_sys::kmsg(&format!(
-                    "{} runs, so the secure element's HAL can reach it",
-                    adsp.display()
-                ));
-            }
+    if let Some(adsp) = adsp()? {
+        if waiting_for_running(&adsp, ADSP_READY)? {
+            return skyward_sys::kmsg(&format!("{} runs, so the secure element's HAL can reach it", adsp.display()));
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Offline: the kernel's own attempt did not have `/firmware` to look
+        // in. Ask now that it does. A phone without that switch is left as it
+        // is, and so is one whose firmware is missing outright - the loader
+        // says so in the kernel log and the moment below runs out.
+        match std::fs::write(ADSP_BOOT, "1") {
+            Ok(()) => skyward_sys::kmsg("the ADSP is offline; asked the loader again now that /firmware is in place")?,
+            Err(e) => skyward_sys::kmsg(&format!("the ADSP is offline and cannot be asked again: {e}"))?,
+        }
+        if waiting_for_running(&adsp, ADSP_RETRY)? {
+            return skyward_sys::kmsg(&format!("{} runs, so the secure element's HAL can reach it", adsp.display()));
+        }
+        return Err(anyhow!("it is not running, even after the loader was asked again"));
     }
-    Err(anyhow!("it did not say it was running within {} seconds", ADSP_READY.as_secs()))
+    Err(anyhow!("the kernel shows no processor that is the DSP"))
+}
+
+/// Whether `adsp` says it is running within `within`.
+#[cfg(target_os = "android")]
+fn waiting_for_running(adsp: &Path, within: std::time::Duration) -> Result<bool> {
+    let asked = std::time::Instant::now();
+    loop {
+        if adsp_running(adsp)? {
+            return Ok(true);
+        }
+        if asked.elapsed() >= within {
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// The processor the kernel names the ADSP, wherever its remoteproc number
