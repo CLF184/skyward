@@ -1027,13 +1027,11 @@ mod tests {
 
     #[test]
     fn the_phone_names_the_stock_build_its_recovery_is_made_on() {
-        for (text, version) in
-            [(include_str!("../../../devices/haotian.toml"), "OS4.0.0.19.XOBCNXM")]
-        {
-            let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
-            assert_eq!(stock.version, version);
-            assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
-        }
+        let text = include_str!("../../../devices/haotian.toml");
+        let version = "OS4.0.0.19.XOBCNXM";
+        let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
+        assert_eq!(stock.version, version);
+        assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
     }
 
     #[test]
@@ -1230,7 +1228,7 @@ mod tests {
         assert!(cfg.touch.double_tap, "two taps on its dark panel light it");
         // A phone that names nothing lights only by its power key.
         let none = "[device]\ncodename = \"x\"\n";
-        assert!(!DeviceConfig::parse(&none).unwrap().touch.double_tap);
+        assert!(!DeviceConfig::parse(none).unwrap().touch.double_tap);
         let set = format!("{none}\n[touch.double_tap]\n");
         assert!(DeviceConfig::parse(&set).is_err(), "the flag is a word of [touch], not a table of its own");
     }
