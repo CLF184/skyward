@@ -352,7 +352,7 @@ recovery's init runs: `ssgtzd` and the OMAPI service, both below.
 
 ## Lighting the dark panel
 
-Only the power key lit it until 0.1.7. On the phone's own system the same panel
+Only the power key lit it until 0.2.1. On the phone's own system the same panel
 lights on a double tap, and its controller keeps reporting fingers with the
 panel off, so the recovery has it too: `tap()` in `skyward-ui/src/app.rs`
 counts a tap only while the display is off, and the second one inside Android's
@@ -414,7 +414,7 @@ CI (`.github/workflows/build-haotian.yml`) builds the image **and** runs
 Clippy is `-D warnings`, so an unused import or a needless borrow fails the
 build; `cargo fmt` habits matter.
 
-A release is a tag: `git push ssh://git@github.com/Rinrroy/skyward.git main v0.1.4`
+A release is a tag: `git push ssh://git@github.com/Rinrroy/skyward.git main v0.2.1`
 builds the same image and publishes it, with `SHA256SUMS` beside it, as a GitHub
 release named for the tag — the artifact a branch run leaves expires after
 thirty days, a release does not. Bump `[workspace.package] version` in
