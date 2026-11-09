@@ -10,8 +10,12 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::str::FromStr;
 
-/// Version of this build, shown on the About page.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version of this build, shown on the About page. Release builds take it
+/// from the tag; other builds use the workspace's default version.
+pub const VERSION: &str = match option_env!("SKYWARD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 const CPU: &str = "/sys/devices/system/cpu";
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
