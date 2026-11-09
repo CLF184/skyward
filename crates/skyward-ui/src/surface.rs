@@ -960,6 +960,15 @@ pub mod kms {
         /// Turn the display off: the panel and the display processor feeding
         /// it stop drawing power. The next frame presented turns it on
         /// again.
+        ///
+        /// **A phone that lights its panel on a double tap must not come
+        /// here.** Xiaomi's touch driver follows the panel's blanking
+        /// notices: this commit is `FB_BLANK POWER DOWN`, and the driver
+        /// suspends the touch IC on it (`xiaomi_touch_suspend_work`), so no
+        /// finger is reported again until the panel is brought back. Such a
+        /// phone keeps its panel dozing instead (`aod::Panel`), which is dark
+        /// to the eye with the CRTC still running and the touchscreen still
+        /// scanning.
         pub fn turn_off(&mut self) -> Result<()> {
             if self.power == Power::Off {
                 return Ok(());

@@ -1591,6 +1591,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         let panel = app.panel(now);
         let mut shown = false;
         let dozes = doze.as_ref().is_some_and(aod::Panel::usable);
+        // A phone that lights on a double tap has to keep its panel in the
+        // panel's own doze rather than taking it down: Xiaomi's touch driver
+        // suspends the touch IC on the panel's blanking notice, so a panel
+        // turned off is a touchscreen that reports nothing, and no tap can
+        // ever come. The panel dozes dark instead — the CRTC runs, the
+        // touchscreen scans, and the glass shows nothing.
+        let keeps_touch = cfg.touch.double_tap && dozes;
         if panel.is_some() {
             // Out of the panel's doze before the page goes over the face.
             if blanked {
@@ -1610,23 +1617,34 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 shown = true;
             }
             blanked = false;
-        } else if dozes && app.state.always_on {
-            // The face goes on the glass before the panel dozes, and again
-            // each minute: an OLED in its doze shows what the frame holds.
+        } else if dozes && (app.state.always_on || keeps_touch) {
+            // The panel is put into its own doze rather than taken down, so
+            // that the CRTC keeps running and Xiaomi's touch driver keeps the
+            // IC scanning: that is what makes a double tap possible at all.
+            // With the always-on display on, the face goes on the glass
+            // before the panel dozes and again each minute, since an OLED in
+            // its doze shows what the frame holds; with it off the frame is
+            // blacked out first, so the doze is simply dark.
             if !blanked {
                 faced.clear();
             }
-            if !blanked || faced != shown_clock {
-                let facts = skyward_ui::aod::Facts {
-                    date: skyward_ui::fmt::date(app.state.lang, unix_now()?, app.state.time_zone),
-                    battery: info.battery.as_ref().map(|b| (b.level, b.plugged)),
-                    slot: info.slot.map(|s| s.letter().to_string()),
-                    data: skyward_ui::fmt::data(app.state.lang, &app.state.data).to_string(),
-                };
-                skyward_ui::aod::face(&mut screen, &fonts, &shown_clock, &facts, cfg.display.density as f32 / 160.0);
+            if app.state.always_on {
+                if !blanked || faced != shown_clock {
+                    let facts = skyward_ui::aod::Facts {
+                        date: skyward_ui::fmt::date(app.state.lang, unix_now()?, app.state.time_zone),
+                        battery: info.battery.as_ref().map(|b| (b.level, b.plugged)),
+                        slot: info.slot.map(|s| s.letter().to_string()),
+                        data: skyward_ui::fmt::data(app.state.lang, &app.state.data).to_string(),
+                    };
+                    skyward_ui::aod::face(&mut screen, &fonts, &shown_clock, &facts, cfg.display.density as f32 / 160.0);
+                    surface.present(&screen)?;
+                    surface.settle()?;
+                    faced.clone_from(&shown_clock);
+                }
+            } else if !blanked {
+                screen.data.fill(0);
                 surface.present(&screen)?;
                 surface.settle()?;
-                faced.clone_from(&shown_clock);
             }
             if !blanked && doze.as_mut().is_some_and(|p| p.want(Want::Dark) == Shown::Blank) {
                 screen.data.fill(0);
@@ -1649,10 +1667,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if backlight.as_ref().is_some_and(|b| b.level == 0) && panel.is_some() {
             surface.settle()?;
         }
-        // Whether the panel keeps the face in its own doze: what the panel
-        // holds then is the face, so it must not be rested or turned off
-        // under it.
-        let dozing = panel.is_none() && dozes && app.state.always_on;
+        // Whether the panel keeps the face in its own doze, or is dark in it
+        // so that a tap can be felt: either way what the panel holds is not
+        // the pages, so it must not be rested or turned off under it.
+        let dozing = panel.is_none() && dozes && (app.state.always_on || keeps_touch);
         // The pages are what this loop is for; a panel whose backlight
         // cannot be written still shows them, and why it could not goes to
         // the kernel log once rather than ending the recovery.
@@ -1773,7 +1791,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         let dark_for = dark_at.map(|at| at.elapsed().as_millis() as u64);
         let idle = Idle { dark: surface.is_off(), dark_for, wants_taps: want_taps, taps_wake, needed };
-        let may_sleep = idle.may_sleep() == Sleep::May;
+        let may_sleep = idle.may_sleep() == Sleep::May && !keeps_touch;
         sleeper.allow(may_sleep);
         // With the panel dark the battery is read less often, since each read
         // is a call into its driver that wakes the CPU for it.

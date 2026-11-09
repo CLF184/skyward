@@ -393,9 +393,7 @@ written.
 kept awake for it. `skyward/src/ui.rs` arms the panel's input node as a wakeup
 source (`skyward_sys::sleep::arm_wakeup`, which writes `enabled` to the device's
 `power/wakeup`) the first time the panel goes dark, and only then lets the phone
-sleep. Where the driver keeps no such switch, the phone stays awake with the
-panel off, which is what every build before 0.2.3 did — correct, and most of what
-the recovery's power draw was. Either way the decision is `Idle::may_sleep` in
+sleep. Either way the decision is `Idle::may_sleep` in
 `skyward-ui/src/surface.rs`, a function with no state, so it is tested on a
 computer rather than on the phone.
 
@@ -403,6 +401,59 @@ A phone that went dark keeps awake for `DARK_GRACE` (30 s) before it is let
 sleep, so a tap just after the panel goes dark still lands. Only `haotian` names
 `double_tap`; a phone whose controller stops reporting fingers with its panel off
 has nothing for the feature to work with.
+
+### The touchscreen dies with the panel, and that is the whole story
+
+Measured on `haotian` (0.2.3, the panel dark). **Xiaomi's touch driver follows
+the display's blanking notices and suspends the touch IC on them:**
+
+```
+[MI_TP_I][xiaomi_drm_panel_notifier_callback:827]: FB_BLANK POWER DOWN
+[MI_TP_I][xiaomi_touch_suspend_work:673]: touch id 0 enter
+```
+
+From that moment `getevent` on `/dev/input/event7` (`Xiaomi_Touch_Input_0`)
+reports **nothing at all** — not a finger, not a `BTN_TOUCH`, not a report —
+while the panel is dark, and it starts again only when the panel is brought
+back. So a tap cannot be felt on a panel that was turned off, and no userspace
+switch changes that:
+
+- The input device is `/sys/devices/virtual/input/input7`, a *virtual* node made
+  by Xiaomi's touch layer; the hardware is `spi2.0` on `synaptics_tcm_spi`, and
+  **neither has a `power/wakeup`** — that is why `arm_wakeup` returns `false` on
+  this phone. Real wakeup sources exist only for the PMIC keys and the GPIO keys.
+- `/sys/kernel/debug/tp_debug/switch_state` takes `irq-enable`/`irq-disable`,
+  `tp-suspend-off` and `tp-sd-off`, and writing them all succeeds (exit 0) — and
+  the IC still reports nothing, because the driver re-suspends it on the next
+  panel notifier and the panel is what the IC is wired to.
+- `/sys/class/touch/touch_dev` has no `gesture_enable`. The sensorhub gesture
+  path the driver logs (`xiaomi_get_gesture_type`, `notify_sensorhub_enable`) is
+  the *system's* double-tap-to-wake, and its switch is not exposed to a recovery.
+
+**This is why the double tap worked while the always-on display was on and
+stopped working when it was turned off.** The AOD path puts the panel into its
+own doze with a DCS command set: the CRTC keeps running, the backlight is 0, and
+**no `FB_BLANK` is ever sent** — so the touch IC is never suspended and the taps
+arrive. Turning the AOD off sent the panel through `rest()`/`turn_off()`, which
+does blank, and took the touchscreen with it.
+
+So a phone that has to feel a tap keeps its panel **dozing dark** rather than
+taking it down: `keeps_touch` in `skyward/src/ui.rs` sends the same doze command
+set the AOD uses with the frame blacked out, and the panel is left alone
+there. The panel is therefore never `Off` on such a phone, so the phone does not
+suspend either — `may_sleep` is false while the panel dozes. **That is the honest
+price of a double tap on this panel: either the panel dozes (touch works, some
+power) or it is off (no touch, least power).** Where a phone's driver does expose
+a wakeup source, `arm_wakeup` succeeds and the panel is taken down instead.
+
+Two things learned while measuring, which are their own kinds of trap:
+
+- **A recovery that exits leaves `recovery` stuck in `D` state inside
+  `msm_release` → `dsi_display_find_mode`**, so `ps` shows it alive when it is
+  gone. Do not read a `recovery` row in `ps` as "the recovery is running".
+- The `dmesg` clock is uptime, and the notifier lines are the only record of
+  what the panel was told. `FB_BLANK UNBLANK`, `FB_BLANK POWER DOWN` and
+  `FB_BLANK LP` are the three that matter.
 
 ## Power
 
