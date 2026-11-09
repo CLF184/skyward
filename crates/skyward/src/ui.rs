@@ -1349,6 +1349,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         Work::Menu | Work::Exit | Work::Fastboot | Work::PromptWipeData | Work::Unsupported(_) => {}
     }
+    // The settings can ask for the data partition to open as a normal
+    // recovery start comes up, without taking the pages to Decrypt. This is
+    // the same opening the Decrypt page starts.
+    if decryptor.is_none() && app.state.auto_decrypt && !fastboot && matches!(&request.work, Work::Menu | Work::Exit) {
+        skyward_sys::kmsg("opening the data partition automatically, as the settings ask")?;
+        app.state.data = Data::Opening;
+        app.refresh();
+        decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
+    }
     // A switch asked for finishes one cut off before itself; fastboot leaves
     // /metadata to fastbootd until the recovery's pages come up.
     if let (Some(worker), false, false) = (systems_worker.as_mut(), switch_asked, fastboot) {

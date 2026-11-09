@@ -546,6 +546,8 @@ pub enum Slider {
 pub enum Switch {
     Vibrate,
     AutoRotate,
+    /// Open the data partition automatically as recovery starts.
+    AutoDecrypt,
     /// Offer internal storage to a computer over USB.
     FileTransfer,
     /// Compress a backup.
@@ -1612,6 +1614,8 @@ pub struct State {
     /// Follow the orientation sensor; off keeps the current direction.
     pub auto_rotate: bool,
     pub rotation: crate::rotation::Rotation,
+    /// Open the data partition as recovery starts.
+    pub auto_decrypt: bool,
     /// How strongly the motor taps, from 0 at the slider's left end to 1
     /// at its right.
     pub vibration: f32,
@@ -1792,6 +1796,7 @@ impl Default for State {
             tablet: false,
             auto_rotate: true,
             rotation: crate::rotation::Rotation::Native,
+            auto_decrypt: false,
             vibration: SLIDER_START,
             file_transfer: true,
             reboot: 0,
@@ -5364,6 +5369,7 @@ impl App {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
                     Switch::AutoRotate => &mut self.state.auto_rotate,
+                    Switch::AutoDecrypt => &mut self.state.auto_decrypt,
                     Switch::FileTransfer => &mut self.state.file_transfer,
                     Switch::Compress => &mut self.state.compress,
                     Switch::Verify => &mut self.state.verify,
@@ -9898,6 +9904,19 @@ mod tests {
         assert_eq!(app.state.time_zone, london);
         tap(&mut app, &f, &i, Action::TimeZone(0));
         assert_eq!(app.state.time_zone, 0, "and China again");
+    }
+
+    #[test]
+    fn automatic_data_decryption_is_a_kept_setting() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        assert!(!app.state.auto_decrypt);
+        tap(&mut app, &f, &i, Action::Toggle(Switch::AutoDecrypt));
+        assert!(app.state.auto_decrypt);
+        let kept = crate::settings::Settings::of(&app.state);
+        let mut restored = State::default();
+        kept.apply(&mut restored);
+        assert!(restored.auto_decrypt);
     }
 
     #[test]

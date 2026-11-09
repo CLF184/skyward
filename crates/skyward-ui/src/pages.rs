@@ -397,9 +397,21 @@ pub fn settings(cx: &Ctx) -> Frame {
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
+        Row::new(l.pick(["自动解密 data", "自動解密 data", "Auto-decrypt data"]))
+            .icon(BLUE, Icon::Lock)
+            .trail(Trail::Switch(s.auto_decrypt)),
     ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
-    y = widgets::section(&mut c, t, f, general.bottom, "USB");
+    out.extend(hits(
+        &general.rows,
+        &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Toggle(Switch::AutoDecrypt)],
+    ));
+    let note = l.pick([
+        "开启后，进入 recovery 时自动展开 metadata 加密并挂载 data；用户文件仍需锁屏凭据。",
+        "開啟後，進入 recovery 時自動展開 metadata 加密並掛載 data；使用者檔案仍需螢幕鎖定憑證。",
+        "When on, recovery automatically opens metadata encryption and mounts data; user files still need the screen-lock credential.",
+    ]);
+    let general_bottom = widgets::footnote(&mut c, t, f, general.bottom, note);
+    y = widgets::section(&mut c, t, f, general_bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
     let note = l.pick([
