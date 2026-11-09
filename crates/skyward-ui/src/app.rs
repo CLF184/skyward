@@ -1604,7 +1604,9 @@ pub struct State {
     /// A dark panel keeps the clock and the phone's readings on the glass in
     /// the panel's own doze, rather than being put out. A phone whose panel
     /// has no doze of its own shows nothing either way, and the switch is
-    /// not offered on it.
+    /// not offered on it. It starts off: a phone flashed and never visited
+    /// here puts a dark panel out the way the recovery always did, since a
+    /// face left glowing all night is a thing to ask for rather than to find.
     pub always_on: bool,
     /// This phone's panel has a doze of its own, which the settings page then
     /// offers a switch for.
@@ -1786,7 +1788,9 @@ impl Default for State {
             vibrate: true,
             vibration: SLIDER_START,
             file_transfer: true,
-            always_on: true,
+            // Off, so a freshly flashed phone is put out as it always was and
+            // the face is turned on from the settings page.
+            always_on: false,
             panel_dozes: false,
             reboot: 0,
             wipe: [false; WIPES.len()],
@@ -8193,16 +8197,17 @@ mod tests {
         let offered = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::AlwaysOn));
         let mut app = App::new(Screen::Settings, W, H, PPD);
         assert!(!offered(&mut app), "a panel with no doze of its own has nothing to keep on the glass");
-        // A phone whose panel does doze offers the switch, and it starts on.
+        // A phone whose panel does doze offers the switch, and a start that
+        // has not been to the page yet has it off: the face is asked for.
         app.state.panel_dozes = true;
         app.refresh();
         assert!(offered(&mut app), "the switch is among the page's controls");
-        assert!(app.state.always_on, "the face shows unless it is turned off");
+        assert!(!app.state.always_on, "the face is off until it is turned on");
         // The switch is worked the way any other on the page is.
         app.act(Action::Toggle(Switch::AlwaysOn), 1000);
-        assert!(!app.state.always_on, "the switch turns it off");
+        assert!(app.state.always_on, "the switch turns it on");
         app.act(Action::Toggle(Switch::AlwaysOn), 2000);
-        assert!(app.state.always_on, "and on again");
+        assert!(!app.state.always_on, "and off again");
     }
 
     #[test]

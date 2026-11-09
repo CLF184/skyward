@@ -394,10 +394,12 @@ pub fn settings(cx: &Ctx) -> Frame {
     if let Some(r) = vibration.below {
         out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
     }
-    // A phone whose panel has a doze of its own keeps a little on the glass
+    // A phone whose panel has a doze of its own can keep a little on the glass
     // with the screen off; one whose panel has none shows nothing to offer.
-    // It sits under the vibration, so the settings above it stay where the
-    // pages have always put them.
+    // The switch starts off, so a phone that has never been to this page puts
+    // a dark panel out the way the recovery always did. It sits under the
+    // vibration, so the settings above it stay where the pages have always put
+    // them.
     let mut y = vibration.bottom;
     if s.panel_dozes {
         y = widgets::section(&mut c, t, f, y, l.pick(["息屏显示", "螢幕關閉顯示", "Always-on display"]));

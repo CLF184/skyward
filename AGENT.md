@@ -350,6 +350,32 @@ recovery's init runs: `ssgtzd` and the OMAPI service, both below.
   credential` (the credential), or `the secure element is holding off further
   tries` (the element's own throttling, after repeated wrong tries).
 
+### The screen lock the phone has now, not the one before it
+
+`locksettings.db` records which of a user's protector blobs the current
+credential opens (`sp-handle`), and Android writes it in SQLite's
+**write-ahead log** mode. A screen lock set or changed while the phone was
+running can therefore still be in `locksettings.db-wal` and not yet in
+`locksettings.db`: the log is folded in at a checkpoint or a clean shutdown,
+not when a value changes.
+
+Reading the file where it lies with `?immutable=1` — which is what Skyward did
+— tells SQLite the file never changes, so it reads the main file and **never
+replays the log**. The recovery then opened the *previous* protector and checked
+the credential against the *previous* `.pwd`: the old password worked, the new
+one did not, and the fault looked like a credential problem rather than a read
+problem. `locksettings.rs` now copies the database and its `-wal`/`-shm` into a
+scratch folder, opens the copy read-write once so that SQLite folds the log in,
+closes it, and reads the copy. That works for a phone switched off without a
+clean shutdown (no `-shm`, or a half-written log) as well as for one that was
+not. Nothing under `/data` is written to, and the copy goes with the read.
+
+The tests build exactly that shape: a WAL-mode database whose newest value lives
+only in the log, copied out while the writing connection is still open — SQLite
+deletes a log when the last connection closes, and a phone that loses power
+closes nothing. `target/wal-fix-test.py` reproduces the whole thing outside Rust
+and is the quickest way to see the before and after.
+
 ## Lighting the dark panel
 
 Only the power key lit it until 0.2.1. On the phone's own system the same panel
@@ -363,11 +389,46 @@ screen pixels, so the slop is multiplied by the width**; comparing it against
 written.
 
 **A suspended phone cannot report a tap**, so a phone that names
-`double_tap = true` in `[touch]` keeps the phone awake while the panel is off —
-`may_sleep` in `skyward/src/ui.rs` is false for it. That is the price: the panel
-lights without the power key, and the phone does not sleep. Only `haotian` names
-it; a phone whose controller stops reporting fingers with its panel off has
-nothing for the feature to work with.
+`double_tap = true` in `[touch]` must be woken by the touchscreen rather than
+kept awake for it. `skyward/src/ui.rs` arms the panel's input node as a wakeup
+source (`skyward_sys::sleep::arm_wakeup`, which writes `enabled` to the device's
+`power/wakeup`) the first time the panel goes dark, and only then lets the phone
+sleep. Where the driver keeps no such switch, the phone stays awake with the
+panel off, which is what every build before 0.2.3 did — correct, and most of what
+the recovery's power draw was. Either way the decision is `Idle::may_sleep` in
+`skyward-ui/src/surface.rs`, a function with no state, so it is tested on a
+computer rather than on the phone.
+
+A phone that went dark keeps awake for `DARK_GRACE` (30 s) before it is let
+sleep, so a tap just after the panel goes dark still lands. Only `haotian` names
+`double_tap`; a phone whose controller stops reporting fingers with its panel off
+has nothing for the feature to work with.
+
+## Power
+
+Three things drew more than a recovery needs, all found from "功耗有点高":
+
+- **The phone never suspended.** `may_sleep` carried a `!cfg.touch.double_tap`
+  term, so `haotian` stayed awake for ever with the panel off. It now sleeps,
+  with the touchscreen armed to wake it (see above).
+- **The panel was switched to 120 Hz** on every start. A recovery's pages are
+  mostly still, and the switch is a modeset the display controller pays for, so
+  it is now `[display] fastest_refresh`, off unless a phone names it. The mode
+  the panel comes up in, DSC and the sub-pixel block are untouched: they are the
+  colour fix and are load-bearing.
+- **The idle loop woke every second** and the battery thread read its driver
+  every second, with the panel dark. The loop now waits `DARK_WAIT` (5 s) when
+  the panel is off and nothing is due — every fd is still polled, so a key, a
+  cable or a tap wakes it at once — and the battery is read every 10 s while the
+  panel is dark, at once through `Readings::ask` when a uevent says to.
+
+`skyward/src/art.rs` clears what ART compiled ahead of time, once per image, on
+the first start after a flash: the phone otherwise runs on code compiled for the
+system it no longer has, re-verifying and recompiling as it goes, which is slower
+and hotter. It records on `persist` (`skyward/art-cleared`, a few bytes) which
+image did it, so it runs once and not at every start, and it never fails the
+recovery — a phone whose data partition will not open is left as it was and
+tried again next time.
 
 ## USB and adb
 

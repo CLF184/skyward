@@ -9,10 +9,18 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// The battery is read this often, and at once when asked; all the
-/// readings every so many times instead.
+/// The battery is read this often while the panel is lit, and at once when
+/// asked; all the readings every so many times instead.
 const BATTERY_EVERY: Duration = Duration::from_secs(1);
 const ALL_EVERY: u32 = 30;
+
+/// How often the battery is read with the panel off.
+///
+/// Each read is a call into the battery's driver, which wakes the CPU for it,
+/// and with the panel dark nobody is watching the number change. It is still
+/// read often enough that a phone put away and picked up shows a level that is
+/// right, and a cable going in reads it at once through [`Readings::ask`].
+const BATTERY_EVERY_DARK: Duration = Duration::from_secs(10);
 
 pub enum Reading {
     /// The battery, and when reading it started.
@@ -23,9 +31,17 @@ pub enum Reading {
 
 pub struct Readings {
     taken: Receiver<Reading>,
-    asks: Sender<()>,
+    asks: Sender<Ask>,
     /// Readable while readings wait.
     wake: OwnedFd,
+}
+
+/// What the screen tells the readings thread.
+enum Ask {
+    /// Read the battery at once.
+    Now,
+    /// The panel has gone dark, or come back on: how often to read it.
+    Dark(bool),
 }
 
 impl Readings {
@@ -38,17 +54,37 @@ impl Readings {
         }
         let (wake, signal) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
         let (tx, taken) = mpsc::channel();
-        let (asks, asked) = mpsc::channel::<()>();
+        let (asks, asked) = mpsc::channel::<Ask>();
         let cfg = cfg.clone();
         thread::Builder::new()
             .name("readings".into())
             .spawn(move || {
                 let mut ticks = 0u32;
+                // The panel starts lit, which is how the recovery comes up.
+                let mut dark = false;
                 loop {
-                    let at_once = match asked.recv_timeout(BATTERY_EVERY) {
-                        Ok(()) => {
-                            while asked.try_recv().is_ok() {}
-                            true
+                    let every = match dark {
+                        false => BATTERY_EVERY,
+                        true => BATTERY_EVERY_DARK,
+                    };
+                    let at_once = match asked.recv_timeout(every) {
+                        Ok(ask) => {
+                            // Everything that came in while this turn was
+                            // taken is folded into one answer: the last word
+                            // on whether the panel is dark wins.
+                            let mut now = matches!(ask, Ask::Now);
+                            for more in asked.try_iter() {
+                                match more {
+                                    Ask::Now => now = true,
+                                    Ask::Dark(is_dark) => dark = is_dark,
+                                }
+                            }
+                            // A change of pace is not a reason to read: the
+                            // next read comes at the new interval.
+                            if matches!(ask, Ask::Dark(_)) && !now {
+                                continue;
+                            }
+                            now
                         }
                         Err(RecvTimeoutError::Timeout) => false,
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -78,7 +114,13 @@ impl Readings {
 
     /// Read the battery at once.
     pub fn ask(&self) {
-        self.asks.send(()).expect("the readings thread runs while its readings are taken");
+        let _ = self.asks.send(Ask::Now);
+    }
+
+    /// The panel has gone dark, or come back on: read the battery less often
+    /// while nobody is looking at it.
+    pub fn dark(&self, dark: bool) {
+        let _ = self.asks.send(Ask::Dark(dark));
     }
 
     /// The readings taken since the last call.

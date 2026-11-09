@@ -44,6 +44,7 @@ use skyward_ui::app::{
 };
 use skyward_ui::settings::Keeper;
 use skyward_ui::surface::kms::KmsSurface;
+use skyward_ui::surface::{Idle, Sleep};
 use skyward_ui::{Canvas, Fonts, Lang, Surface};
 use skyward_vab::{Merge, Standing};
 use std::collections::{BTreeSet, VecDeque};
@@ -70,6 +71,17 @@ const TOUCH_WAIT: Duration = Duration::from_secs(5);
 /// the display turns off; the phone's own system keeps its panel dozing
 /// about as long after the screen goes off.
 const REST: Duration = Duration::from_secs(5);
+
+/// How long the loop waits with the panel off and nothing to do, in
+/// milliseconds.
+///
+/// Every file it waits on is still polled, so a key, a cable, a touch or the
+/// phone's own service answering wakes it at once: this only spaces out the
+/// periodic look, which with the panel dark is the battery and the USB drive
+/// and nothing a person is watching. Five seconds is a fifth of the wakeups a
+/// second would make, and a fifth of what the process costs the sleeping
+/// phone.
+const DARK_WAIT: i32 = 5000;
 
 /// Where logs saved to the temporary folder go, in the recovery service's
 /// own folder, and where in internal storage the others do.
@@ -1132,7 +1144,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     }
     let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0, mono)?;
-    let mut surface = KmsSurface::open("/dev/dri/card0")?;
+    let mut surface = KmsSurface::open("/dev/dri/card0", cfg.display.fastest_refresh)?;
     // What the display was told is worth having in the kernel log even when
     // the pages come up: it says which subpixel block, if any, went out.
     let _ = skyward_sys::kmsg(&format!("the display is {}", surface.describe()));
@@ -1232,6 +1244,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     app.state.panel_dozes = cfg.aod.is_some();
     // When the panel gone dark began to rest.
     let mut rested_at: Option<Instant> = None;
+    // When the panel went dark, which is what the phone's sleep waits out: a
+    // tap right after the panel goes dark should find it awake.
+    let mut dark_at: Option<Instant> = None;
+    // Whether the touchscreen is armed to wake the phone, and whether that
+    // it could not be has been said already rather than every turn.
+    let mut taps_wake = false;
+    let mut taps_told = false;
+    // Whether the panel was dark the last time the readings were told how
+    // often to look, so that they are told only when that changes.
+    let mut was_dark = false;
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
@@ -1648,16 +1670,25 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             // refresh.
             surface.speed_up()?;
             rested_at = None;
+            dark_at = None;
         } else if surface.is_on() {
             // With the backlight off, the panel rests, and the touch
-            // controller following it stops drawing power.
+            // controller following it stops drawing power. This is the moment
+            // the phone may start thinking about sleeping, and the moment a
+            // tap right after it has to still find it awake.
             surface.rest()?;
             rested_at = Some(Instant::now());
+            dark_at = Some(Instant::now());
         } else if rested_at.is_some_and(|at| at.elapsed() >= REST) {
             // Rested long enough, the display goes off: the panel and the
             // display processor feeding it stop drawing power.
             surface.turn_off()?;
             rested_at = None;
+        }
+        // A panel the doze keeps on the glass is not dark either, so it is
+        // not somewhere a phone may be left to sleep.
+        if dozing {
+            dark_at = None;
         }
         // A page at rest draws the rows it has yet to while nothing else
         // is to be done, a band at a time, looking for input between bands.
@@ -1670,15 +1701,26 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // A resting panel turns off once its rest is over.
         let rest_left = rested_at.map(|at| REST.saturating_sub(at.elapsed()).as_millis() as i32);
         let timeout = if ahead { 0 } else { until_due.into_iter().chain(rest_left).min().map_or(1000, |t| t.clamp(floor, 1000)) };
+        // A dark phone with nothing to do has no reason to wake every second:
+        // every fd it waits on is still polled, so a key, a cable or a tap
+        // still wakes it at once, and only the periodic look — the battery,
+        // the drive — is spaced out. The panel's own deadlines keep the
+        // shorter wait where anything is due.
+        let quiet = surface.is_off() && !ahead && until_due.is_none() && rest_left.is_none();
+        let timeout = if quiet { DARK_WAIT } else { timeout };
         // With the display off, the phone sleeps unless something needs it
         // awake: work under way, fastboot or sideload, a restart on its way,
         // a command running in the terminal, a network being joined, the
         // battery read after a uevent, or a computer on the USB port, whose
         // adb and file transfer stay up.
         //
-        // A phone whose panel lights on a double tap is awake for it too: a
-        // suspended phone is one the touchscreen cannot report a tap to, so
-        // sleeping would leave the panel lit only by the power key again.
+        // A phone whose panel lights on a double tap has to feel the tap, and
+        // a suspended phone is one the touchscreen cannot report a tap to.
+        // The answer is not to stay awake for ever — that is most of what the
+        // recovery's power draw was — but to arm the touchscreen as something
+        // that wakes the phone, so that the tap ends the suspend instead of
+        // being missed by it. Where that cannot be armed, staying awake is
+        // what is left, and `Idle` says so.
         let systems_busy = systems_worker.as_ref().is_some_and(systems::Worker::busy);
         let busy = installer.is_some()
             || eraser.is_some()
@@ -1698,17 +1740,47 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             Some(sh) => !sh.waiting()?,
             None => false,
         };
-        let may_sleep = surface.is_off()
-            && !busy
-            && !fastboot
-            && !sideloading
-            && leave_at.is_none()
-            && !joining
-            && !running
-            && !cfg.touch.double_tap
-            && asked.is_none()
-            && usb_link()? != UsbLink::Connected;
+        let needed = busy
+            || fastboot
+            || sideloading
+            || leave_at.is_some()
+            || joining
+            || running
+            || asked.is_some()
+            || usb_link()? == UsbLink::Connected;
+        // The touchscreen is armed the first time the panel is dark: it is
+        // armed once and stays armed, since the phone may be suspended at any
+        // moment after it. Nothing is written where no panel has come up, or
+        // where the phone asks for no taps at all.
+        let want_taps = cfg.touch.double_tap;
+        if want_taps && surface.is_off() && !taps_wake {
+            if let Some(node) = inputs.panel_node() {
+                match skyward_sys::sleep::arm_wakeup(&node) {
+                    Ok(true) => {
+                        taps_wake = true;
+                        let _ = skyward_sys::kmsg("the touchscreen wakes the phone, so a tap lights the dark panel after it has slept");
+                    }
+                    // The driver keeps no wakeup switch, or refused one: the
+                    // phone then stays awake with the panel off, which is what
+                    // it did before this existed. Said once, not every turn.
+                    Ok(false) | Err(_) if !taps_told => {
+                        taps_told = true;
+                        let _ = skyward_sys::kmsg("the touchscreen cannot wake the phone, so it stays awake with the panel off to feel the two taps");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let dark_for = dark_at.map(|at| at.elapsed().as_millis() as u64);
+        let idle = Idle { dark: surface.is_off(), dark_for, wants_taps: want_taps, taps_wake, needed };
+        let may_sleep = idle.may_sleep() == Sleep::May;
         sleeper.allow(may_sleep);
+        // With the panel dark the battery is read less often, since each read
+        // is a call into its driver that wakes the CPU for it.
+        if idle.dark != was_dark {
+            was_dark = idle.dark;
+            readings.dark(idle.dark);
+        }
         let mut fds = vec![inputs.fd(), uevents.fd(), sleeper.fd()];
         if let Some(i) = &installer {
             fds.push(i.fd());

@@ -366,6 +366,16 @@ pub struct Display {
     /// sliding over another rounds its leading corners to it.
     #[serde(default)]
     pub corner_radius: u32,
+    /// Whether the panel is switched to its fastest refresh once it is up.
+    ///
+    /// Off unless a phone asks for it. A recovery's pages are mostly still,
+    /// and 60 Hz draws the moving ones quite well enough; the switch to the
+    /// faster mode is a modeset the panel and the display controller both pay
+    /// for, in power and in the frames it takes to settle. A phone whose
+    /// panel is its own thing to drive, and whose config says so, still gets
+    /// it.
+    #[serde(default)]
+    pub fastest_refresh: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

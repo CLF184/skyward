@@ -50,7 +50,9 @@ pub struct Settings {
     /// A computer connected over USB is offered internal storage.
     pub file_transfer: bool,
     /// A dark panel keeps the clock and the phone's readings on the glass in
-    /// the panel's own doze, rather than being put out.
+    /// the panel's own doze, rather than being put out. A file that names
+    /// none leaves it off, which is what a freshly flashed phone starts with:
+    /// the face is asked for on the settings page, not found already lit.
     pub always_on: bool,
     pub install: Install,
     pub backup: Backup,
@@ -313,7 +315,7 @@ mod tests {
             vibrate: false,
             vibration: 0.4,
             file_transfer: false,
-            always_on: false,
+            always_on: true,
             check_signature: true,
             keep_recovery: false,
             backup: [false, true, true, false],
@@ -329,7 +331,12 @@ mod tests {
         kept.apply(&mut back);
         assert_eq!(Settings::of(&back), Settings::of(&state));
         assert_eq!((back.lang, back.screen_off, back.time_zone), (Lang::En, 6, 7));
-        assert!(!back.always_on, "the face on a dark panel is kept off too");
+        assert!(back.always_on, "a face turned on is still on at the next start");
+        // The value carried is the one a start does not have of itself, so
+        // what comes back proves the file rather than the default. The
+        // default is the other half of the same question: a phone flashed and
+        // never visited here has no face on its dark panel.
+        assert!(!State::default().always_on, "the face on a dark panel is off until it is turned on");
     }
 
     #[test]
@@ -342,7 +349,7 @@ mod tests {
         assert_eq!(json["backup"]["parts"], serde_json::json!(["boot", "modem"]));
         assert_eq!(json["logs"]["to"], "temporary");
         assert_eq!(json["spoken"], "zh-Hans");
-        assert_eq!(json["always_on"], true, "the face on a dark panel is on until turned off");
+        assert_eq!(json["always_on"], false, "the face on a dark panel is off until it is turned on");
         assert!(json.get("language").is_none(), "no language is chosen until one is");
         let never = Settings::of(&State { screen_off: SCREEN_OFF.len() - 1, ..State::default() });
         assert_eq!(never.screen_off, 0, "a screen that stays on");
