@@ -99,10 +99,20 @@ pub struct DeviceConfig {
 pub struct Stock {
     /// The build's version, such as OS4.0.4.0.XPACNXM.
     pub version: String,
-    /// Where the package is downloaded from, over HTTPS.
+    /// The first place the package is downloaded from, over HTTPS.
     pub package: String,
+    /// Other places to try in order when an earlier one cannot be opened.
+    #[serde(default)]
+    pub packages: Vec<String>,
     /// The recovery partition's SHA-256, in lowercase hex.
     pub recovery: String,
+}
+
+impl Stock {
+    /// Every place the package can be downloaded from, in the order to try.
+    pub fn sources(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.package.as_str()).chain(self.packages.iter().map(String::as_str))
+    }
 }
 
 /// What brings the phone's WLAN up inside a recovery, which loads none of
@@ -732,14 +742,15 @@ impl DeviceConfig {
             }
         }
         if let Some(stock) = &cfg.stock {
-            let name = stock.package.rsplit('/').next().unwrap_or_default();
             ensure!(!stock.version.is_empty(), "[stock] version must not be empty");
-            ensure!(
-                stock.package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version),
-                "[stock] package: {} is not an HTTPS address of the full package of {}",
-                stock.package,
-                stock.version
-            );
+            for package in stock.sources() {
+                let name = package.rsplit('/').next().unwrap_or_default();
+                ensure!(
+                    package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version),
+                    "[stock] package: {package} is not an HTTPS address of the full package of {}",
+                    stock.version
+                );
+            }
             ensure!(
                 stock.recovery.len() == 64 && stock.recovery.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 "[stock] recovery: {} is not a SHA-256 in lowercase hex",
@@ -1085,7 +1096,8 @@ mod tests {
 
     #[test]
     fn a_stock_build_is_a_full_package_over_https_and_a_sha_256() {
-        let ok = "[device]\ncodename = \"x\"\n[stock]\nversion = \"OS1.0.1.0.XXXCNXM\"\npackage = \"https://d.example/OS1.0.1.0.XXXCNXM/x-ota_full-OS1.0.1.0.XXXCNXM-user-16.0-0123456789.zip\"\n";
+        let package = "https://d.example/OS1.0.1.0.XXXCNXM/x-ota_full-OS1.0.1.0.XXXCNXM-user-16.0-0123456789.zip";
+        let ok = format!("[device]\ncodename = \"x\"\n[stock]\nversion = \"OS1.0.1.0.XXXCNXM\"\npackage = \"{package}\"\n");
         let hash = "faa425b10231a0cfe2d74ff34f344f032ee2d891ea5e9420bf4e67cd86d622a7";
         assert!(DeviceConfig::parse(&format!("{ok}recovery = \"{hash}\"\n")).is_ok());
         assert!(DeviceConfig::parse(&format!("{ok}recovery = \"{}\"\n", hash.to_uppercase())).is_err(), "in lowercase");
@@ -1094,6 +1106,10 @@ mod tests {
         assert!(DeviceConfig::parse(&format!("{plain}recovery = \"{hash}\"\n")).is_err(), "over plain HTTP");
         let other = ok.replace("version = \"OS1.0.1.0", "version = \"OS1.0.2.0");
         assert!(DeviceConfig::parse(&format!("{other}recovery = \"{hash}\"\n")).is_err(), "the package of another build");
+        let mirror = package.replace("d.example", "m.example");
+        let mirrors = format!("{ok}packages = [\"{mirror}\"]\nrecovery = \"{hash}\"\n");
+        let stock = DeviceConfig::parse(&mirrors).unwrap().stock.unwrap();
+        assert_eq!(stock.sources().collect::<Vec<_>>(), [package, mirror.as_str()]);
         assert_eq!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().stock, None);
     }
 

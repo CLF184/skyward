@@ -217,6 +217,9 @@ fn main() -> Result<()> {
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
             println!("version={}\npackage={}\nrecovery={}", stock.version, stock.package, stock.recovery);
+            for mirror in &stock.packages {
+                println!("mirror={mirror}");
+            }
             match out {
                 Some(out) => take_stock_recovery(&stock, &out),
                 None => Ok(()),
@@ -397,7 +400,19 @@ fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> 
     std::fs::create_dir_all(parent).with_context(|| format!("make {}", parent.display()))?;
     // Taken out beside where it goes, so it is moved there whole.
     let work = tempfile::Builder::new().prefix(".stock").tempdir_in(parent).with_context(|| format!("make a folder in {}", parent.display()))?;
-    let payload = unpayload::Payload::open_url(&stock.package).with_context(|| format!("open {}", stock.package))?;
+    let mut opened = None;
+    let mut failures = Vec::new();
+    for source in stock.sources() {
+        eprintln!("opening {source}");
+        match unpayload::Payload::open_url(source) {
+            Ok(payload) => {
+                opened = Some((payload, source));
+                break;
+            }
+            Err(error) => failures.push(format!("{source}: {error:#}")),
+        }
+    }
+    let (payload, source) = opened.with_context(|| format!("open any stock package source:\n{}", failures.join("\n")))?;
     let options = unpayload::ExtractOptions { output_dir: work.path().to_path_buf(), partitions: vec![RECOVERY.into()], ..Default::default() };
     let report = |event: unpayload::Event<'_>| match event {
         unpayload::Event::Started { partitions } => {
@@ -408,10 +423,10 @@ fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> 
         unpayload::Event::Extracted(image) => println!("took {} out: {} bytes", image.partition, image.size),
         unpayload::Event::Progress { .. } => {}
     };
-    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {}", stock.package))?;
-    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{} holds no {RECOVERY} partition", stock.package))?;
+    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {source}"))?;
+    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{source} holds no {RECOVERY} partition"))?;
     let sum: String = image.sha256.as_deref().context("the package's own sum of the image was not checked")?.iter().map(|b| format!("{b:02x}")).collect();
-    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {} has the SHA-256 {sum}, where the configuration names {}", stock.package, stock.recovery);
+    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {source} has the SHA-256 {sum}, where the configuration names {}", stock.recovery);
     std::fs::rename(&image.path, out).with_context(|| format!("move {} to {}", image.path.display(), out.display()))?;
     println!("wrote {} ({} bytes), its SHA-256 the one the configuration names", out.display(), image.size);
     Ok(())
