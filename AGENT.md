@@ -388,14 +388,22 @@ screen pixels, so the slop is multiplied by the width**; comparing it against
 `0.08` directly makes a double tap impossible, which is how it was first
 written.
 
-**A suspended phone cannot report a tap**, so a phone that names
-`double_tap = true` in `[touch]` must be woken by the touchscreen rather than
-kept awake for it. `skyward/src/ui.rs` arms the panel's input node as a wakeup
-source (`skyward_sys::sleep::arm_wakeup`, which writes `enabled` to the device's
-`power/wakeup`) the first time the panel goes dark, and only then lets the phone
-sleep. Either way the decision is `Idle::may_sleep` in
-`skyward-ui/src/surface.rs`, a function with no state, so it is tested on a
-computer rather than on the phone.
+**A suspended phone cannot report a tap**, so the two-tap wake is a switch on
+the settings page rather than something a phone does because its panel could.
+`[touch] double_tap` in the device's toml says only that the panel **can**: the
+gesture ships **off**, because it costs the phone its suspend (see below), and
+least power is what a recovery should do unless someone asks for more.
+`skyward/src/ui.rs` reads the switch from the settings file
+(`State::double_tap`, kept in `/metadata/skyward/settings.json`) and offers the
+row only where the panel has a doze of its own to keep dark.
+
+Where a driver does expose a wakeup source, `skyward/src/ui.rs` arms the panel's
+input node (`skyward_sys::sleep::arm_wakeup`, which writes `enabled` to the
+device's `power/wakeup`) the first time the panel goes dark, and then the panel
+is taken down and the phone sleeps as usual. **This panel has no such source**,
+so there the panel is kept dozing instead. Either way the decision is
+`Idle::may_sleep` in `skyward-ui/src/surface.rs`, a function with no state, so it
+is tested on a computer rather than on the phone.
 
 A phone that went dark keeps awake for `DARK_GRACE` (30 s) before it is let
 sleep, so a tap just after the panel goes dark still lands. Only `haotian` names

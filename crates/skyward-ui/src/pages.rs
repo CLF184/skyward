@@ -171,6 +171,7 @@ const SPECS: Text = ["全部参数与信息", "全部規格與資訊", "All spec
 const LOGS: Text = ["导出日志", "匯出記錄", "Export logs"];
 const SCREEN_TIMEOUT: Text = ["息屏时间", "螢幕自動關閉", "Screen timeout"];
 const ALWAYS_ON: Text = ["息屏显示", "螢幕關閉顯示", "Always-on display"];
+const DOUBLE_TAP: Text = ["双击亮屏", "連點兩下亮屏", "Double-tap to wake"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
 const SKYWARD_UPDATE: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
@@ -414,11 +415,24 @@ pub fn settings(cx: &Ctx) -> Frame {
         y = widgets::footnote(&mut c, t, f, aod.bottom, note);
     }
     y = widgets::section(&mut c, t, f, y, l.pick(["通用", "一般", "General"]));
-    let general = widgets::list(&mut c, t, f, y, &[
+    // Two taps on the dark panel light it, on a panel whose touch controller
+    // goes on reporting fingers with the panel off. It costs the phone its
+    // suspend — the panel has to keep dozing for the taps to be felt at all,
+    // since Xiaomi's driver suspends the touchscreen with the panel's blanking
+    // — so it is asked for here rather than shipped on.
+    let mut rows = vec![
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
-    ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
+    ];
+    if s.panel_taps {
+        rows.push(Row::new(l.pick(DOUBLE_TAP)).trail(Trail::Switch(s.double_tap)));
+    }
+    let general = widgets::list(&mut c, t, f, y, &rows);
+    let mut actions = vec![Action::Open(Screen::Language), Action::Open(Screen::TimeZone)];
+    if s.panel_taps {
+        actions.push(Action::Toggle(Switch::DoubleTap));
+    }
+    out.extend(hits(&general.rows, &actions));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));

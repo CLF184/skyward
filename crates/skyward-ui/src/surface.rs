@@ -46,7 +46,7 @@ pub struct Idle {
     pub dark: bool,
     /// How long ago it went dark, in milliseconds; `None` while it is lit.
     pub dark_for: Option<u64>,
-    /// The phone names `[touch] double_tap`, so a tap has to be felt with the
+    /// The phone's two-tap wake is on, so a tap has to be felt with the
     /// panel off.
     pub wants_taps: bool,
     /// The touch panel is armed to wake the phone from a suspend.

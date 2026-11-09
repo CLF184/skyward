@@ -50,12 +50,11 @@ load = ["synaptics_tcm2", "stm_st54se_gpio", "stm_nfc_i2c"]
 writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
 # Two taps on the dark panel light it again, as the phone's own system's
 # double tap does. Its controller keeps reporting fingers while the panel is
-# off, so the taps arrive. A suspended phone is one they cannot arrive at,
-# which is why the recovery arms the touchscreen as a wakeup source before it
-# sleeps: the phone suspends with the panel dark, and the first tap wakes it,
-# so the second one is the one that lights the panel. Where this phone's
-# driver keeps no wakeup switch the recovery stays awake with the panel off
-# instead, which is what the builds before 0.2.3 did on every phone.
+# off, so the taps arrive. This only says the panel *can*: the gesture is a
+# switch on the settings page and ships off, because it costs the phone its
+# suspend — the panel has to keep dozing dark for the taps to be felt, since
+# Xiaomi's driver suspends the touch IC on the panel's blanking notice, so a
+# panel taken down is a touchscreen that reports nothing.
 double_tap = true
 
 # The node the phone's own init opens to every program as it boots, which a

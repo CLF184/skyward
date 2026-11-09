@@ -560,6 +560,9 @@ pub enum Switch {
     /// Show the clock and the phone's readings on a dark panel, in the
     /// panel's own doze, rather than putting the panel out.
     AlwaysOn,
+    /// Light the dark panel when it is tapped twice, which keeps the panel
+    /// dozing rather than taken down so that the taps can be felt at all.
+    DoubleTap,
     /// Show the password typed rather than a dot for each character.
     ShowPassword,
 }
@@ -1608,6 +1611,17 @@ pub struct State {
     /// here puts a dark panel out the way the recovery always did, since a
     /// face left glowing all night is a thing to ask for rather than to find.
     pub always_on: bool,
+    /// This phone's panel has the two-tap wake at all, which the settings page
+    /// then offers a switch for: a panel whose touch controller stops
+    /// reporting fingers with the panel off has nothing for the gesture to
+    /// work with, and shows nothing either way.
+    pub panel_taps: bool,
+    /// Two taps on the dark panel light it again. It starts off, because a
+    /// phone that offers the gesture has to keep its panel dozing rather than
+    /// taking it down — the touchscreen is suspended with the panel's
+    /// blanking — and a dozing panel is a phone that never suspends. Least
+    /// power is what a recovery should do unless someone asks for more.
+    pub double_tap: bool,
     /// This phone's panel has a doze of its own, which the settings page then
     /// offers a switch for.
     pub panel_dozes: bool,
@@ -1791,6 +1805,10 @@ impl Default for State {
             // Off, so a freshly flashed phone is put out as it always was and
             // the face is turned on from the settings page.
             always_on: false,
+            panel_taps: false,
+            // Off, so a phone flashed and never visited here puts its panel
+            // out and suspends, which is the least it can draw.
+            double_tap: false,
             panel_dozes: false,
             reboot: 0,
             wipe: [false; WIPES.len()],
@@ -5278,6 +5296,7 @@ impl App {
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
                     Switch::AlwaysOn => &mut self.state.always_on,
+                    Switch::DoubleTap => &mut self.state.double_tap,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
                 *on = !*on;
@@ -8208,6 +8227,26 @@ mod tests {
         assert!(app.state.always_on, "the switch turns it on");
         app.act(Action::Toggle(Switch::AlwaysOn), 2000);
         assert!(!app.state.always_on, "and off again");
+    }
+
+    #[test]
+    fn the_two_tap_switch_shows_only_where_the_panel_offers_it_and_starts_off() {
+        let (f, i) = (fonts(), info());
+        let offered = |app: &mut App| app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::DoubleTap));
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        assert!(!offered(&mut app), "no panel reports fingers with it dark, so there is nothing to offer");
+        // A phone whose panel can doze and whose driver keeps reporting offers
+        // the switch, and a start that has not been to the page yet has it
+        // off: the gesture costs the phone its suspend, so it is asked for.
+        app.state.panel_taps = true;
+        app.refresh();
+        assert!(offered(&mut app), "the switch is among the page's controls");
+        assert!(!app.state.double_tap, "the two-tap wake is off until it is turned on");
+        // The switch is worked the way any other on the page is.
+        app.act(Action::Toggle(Switch::DoubleTap), 1000);
+        assert!(app.state.double_tap, "the switch turns it on");
+        app.act(Action::Toggle(Switch::DoubleTap), 2000);
+        assert!(!app.state.double_tap, "and off again");
     }
 
     #[test]

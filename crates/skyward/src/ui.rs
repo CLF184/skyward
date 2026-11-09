@@ -1242,6 +1242,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Whether the settings page offers a switch for the panel's own doze: a
     // phone whose panel has one.
     app.state.panel_dozes = cfg.aod.is_some();
+    // The two-tap wake is offered where the phone's configuration names it and
+    // the panel can doze: the taps are only felt while the panel stays in its
+    // doze, so a phone with no doze of its own has no way to offer them.
+    app.state.panel_taps = cfg.touch.double_tap && app.state.panel_dozes;
     // When the panel gone dark began to rest.
     let mut rested_at: Option<Instant> = None;
     // When the panel went dark, which is what the phone's sleep waits out: a
@@ -1591,13 +1595,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         let panel = app.panel(now);
         let mut shown = false;
         let dozes = doze.as_ref().is_some_and(aod::Panel::usable);
-        // A phone that lights on a double tap has to keep its panel in the
+        // A phone whose two-tap wake is on has to keep its panel in the
         // panel's own doze rather than taking it down: Xiaomi's touch driver
         // suspends the touch IC on the panel's blanking notice, so a panel
         // turned off is a touchscreen that reports nothing, and no tap can
         // ever come. The panel dozes dark instead — the CRTC runs, the
-        // touchscreen scans, and the glass shows nothing.
-        let keeps_touch = cfg.touch.double_tap && dozes;
+        // touchscreen scans, and the glass shows nothing. With the switch off
+        // the panel is taken down as it always was, and the phone suspends.
+        let keeps_touch = app.state.panel_taps && app.state.double_tap && dozes;
         if panel.is_some() {
             // Out of the panel's doze before the page goes over the face.
             if blanked {
@@ -1770,23 +1775,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // armed once and stays armed, since the phone may be suspended at any
         // moment after it. Nothing is written where no panel has come up, or
         // where the phone asks for no taps at all.
-        let want_taps = cfg.touch.double_tap;
-        if want_taps && surface.is_off() && !taps_wake {
-            if let Some(node) = inputs.panel_node() {
-                match skyward_sys::sleep::arm_wakeup(&node) {
-                    Ok(true) => {
-                        taps_wake = true;
-                        let _ = skyward_sys::kmsg("the touchscreen wakes the phone, so a tap lights the dark panel after it has slept");
-                    }
-                    // The driver keeps no wakeup switch, or refused one: the
-                    // phone then stays awake with the panel off, which is what
-                    // it did before this existed. Said once, not every turn.
-                    Ok(false) | Err(_) if !taps_told => {
-                        taps_told = true;
-                        let _ = skyward_sys::kmsg("the touchscreen cannot wake the phone, so it stays awake with the panel off to feel the two taps");
-                    }
-                    _ => {}
-                }
+        let want_taps = keeps_touch;
+        // A driver that can be armed to wake the phone lets the panel be taken
+        // down and the phone sleep, with the tap ending the sleep. This panel's
+        // cannot — its touch hardware has no wakeup source at all — which is
+        // why the panel is kept dozing instead; arming is tried anyway, so a
+        // phone whose driver does offer one gets the cheaper path.
+        if want_taps && surface.is_off() && !taps_wake && !taps_told {
+            let armed = inputs.panel_node().is_some_and(|node| skyward_sys::sleep::arm_wakeup(&node).unwrap_or(false));
+            taps_told = true;
+            taps_wake = armed;
+            if armed {
+                let _ = skyward_sys::kmsg("the touchscreen wakes the phone, so a tap lights the dark panel after it has slept");
+            } else {
+                let _ = skyward_sys::kmsg("the touchscreen cannot wake the phone, so the panel keeps dozing dark for the two taps, and the phone does not sleep");
             }
         }
         let dark_for = dark_at.map(|at| at.elapsed().as_millis() as u64);

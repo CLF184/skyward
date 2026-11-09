@@ -54,6 +54,11 @@ pub struct Settings {
     /// none leaves it off, which is what a freshly flashed phone starts with:
     /// the face is asked for on the settings page, not found already lit.
     pub always_on: bool,
+    /// Two taps on the dark panel light it again. A file that names none
+    /// leaves it off, which is what a freshly flashed phone starts with: the
+    /// gesture costs the phone its suspend, since the panel has to keep
+    /// dozing for the taps to be felt, so it is asked for rather than given.
+    pub double_tap: bool,
     pub install: Install,
     pub backup: Backup,
     pub logs: Logs,
@@ -132,6 +137,7 @@ impl Settings {
             vibration: state.vibration,
             file_transfer: state.file_transfer,
             always_on: state.always_on,
+            double_tap: state.double_tap,
             install: Install { check_signature: state.check_signature, keep_recovery: state.keep_recovery },
             backup: Backup {
                 parts: names(&state.backup, &PARTS),
@@ -191,6 +197,7 @@ impl Settings {
         }
         state.file_transfer = self.file_transfer;
         state.always_on = self.always_on;
+        state.double_tap = self.double_tap;
         state.check_signature = self.install.check_signature;
         state.keep_recovery = self.install.keep_recovery;
         state.backup = picked(&self.backup.parts, &PARTS);
@@ -316,6 +323,7 @@ mod tests {
             vibration: 0.4,
             file_transfer: false,
             always_on: true,
+            double_tap: true,
             check_signature: true,
             keep_recovery: false,
             backup: [false, true, true, false],
@@ -332,11 +340,14 @@ mod tests {
         assert_eq!(Settings::of(&back), Settings::of(&state));
         assert_eq!((back.lang, back.screen_off, back.time_zone), (Lang::En, 6, 7));
         assert!(back.always_on, "a face turned on is still on at the next start");
+        assert!(back.double_tap, "a two-tap wake turned on is still on at the next start");
         // The value carried is the one a start does not have of itself, so
         // what comes back proves the file rather than the default. The
         // default is the other half of the same question: a phone flashed and
-        // never visited here has no face on its dark panel.
+        // never visited here has no face on its dark panel, and no two-tap
+        // wake — both cost power, so both are asked for.
         assert!(!State::default().always_on, "the face on a dark panel is off until it is turned on");
+        assert!(!State::default().double_tap, "the two-tap wake is off until it is turned on");
     }
 
     #[test]
@@ -350,6 +361,7 @@ mod tests {
         assert_eq!(json["logs"]["to"], "temporary");
         assert_eq!(json["spoken"], "zh-Hans");
         assert_eq!(json["always_on"], false, "the face on a dark panel is off until it is turned on");
+        assert_eq!(json["double_tap"], false, "the two-tap wake is off until it is turned on");
         assert!(json.get("language").is_none(), "no language is chosen until one is");
         let never = Settings::of(&State { screen_off: SCREEN_OFF.len() - 1, ..State::default() });
         assert_eq!(never.screen_off, 0, "a screen that stays on");
