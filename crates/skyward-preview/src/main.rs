@@ -285,6 +285,21 @@ fn main() -> Result<()> {
         println!("wrote {}", path.display());
     }
 
+    // The settings page as a phone whose panel offers both the always-on face
+    // and the two-tap wake shows it: both switches there, both off, which is
+    // what a freshly flashed phone has.
+    for (name, dark) in [("202-settings-panel-switches-light", false), ("203-settings-panel-switches-dark", true)] {
+        let mut app = App::new(Screen::Settings, w, h, ppd);
+        app.state.lang = lang;
+        app.state.dark = dark;
+        app.state.data = Data::Open;
+        app.state.panel_dozes = true;
+        app.state.panel_taps = true;
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, &info))?;
+        println!("wrote {}", path.display());
+    }
+
     // The mount page as it opens after boot, after an unmount that failed,
     // and while an update waits to merge, with some partitions unmounted.
     let busy = MountFailure {
