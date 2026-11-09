@@ -66,6 +66,12 @@ pub const ENTRIES: &[Entry] = &[
     ),
     entry(["导出日志", "匯出記錄", "Export logs"], ADVANCED, Screen::Logs, &["daochurizhi", "dcrz", "rizhi", "rz", "logs", "dmesg"]),
     entry(
+        ["刷入 Magisk", "刷入 Magisk", "Flash Magisk"],
+        ADVANCED,
+        Screen::Magisk,
+        &["shuarumagisk", "srmagisk", "magisk", "root", "刷入"],
+    ),
+    entry(
         ["系统更新", "系統更新", "System update"],
         ADVANCED,
         Screen::Update,
@@ -219,6 +225,12 @@ mod tests {
         assert_eq!(titles("skyward"), ["Skyward 更新"]);
         assert_eq!(titles("gengxin"), ["系统更新", "Skyward 更新"]);
         assert!(find_on("skyward", Lang::Hans, |s| s != Screen::SkywardUpdate).is_empty());
+    }
+
+    #[test]
+    fn magisk_is_found_on_the_advanced_page() {
+        assert_eq!(titles("magisk"), ["刷入 Magisk"]);
+        assert!(find_on("magisk", Lang::Hans, |s| s != Screen::Magisk).is_empty());
     }
 
     #[test]

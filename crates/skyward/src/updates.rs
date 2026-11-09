@@ -48,12 +48,18 @@ pub enum Task {
     /// partitions of the slot that starts next and of any other slot that
     /// holds Skyward.
     UpdateSkyward { build: Build, codename: String, path: PathBuf },
+    /// Ask GitHub for the Magisk APKs in Skyward's shared resource release.
+    CheckMagisk { probe: String },
+    /// Download the Magisk APK `build` to `path`.
+    DownloadMagisk { build: Build, path: PathBuf },
 }
 
 pub enum Event {
     Checked(Result<Option<Release>, Unanswered>),
     /// What GitHub answered of Skyward's newest release.
     SkywardChecked(Result<Newest, Unanswered>),
+    /// The Magisk APKs GitHub gives in Skyward's shared resource release.
+    MagiskChecked(Result<Vec<Build>, Unanswered>),
     /// How far the download has come, and how fast it goes, in bytes a
     /// second.
     Progress(Progress, u64),
@@ -196,6 +202,38 @@ impl Worker {
                             }
                             _ => {}
                         }
+                        tell(Event::Ended(end));
+                    }
+                    Task::CheckMagisk { probe } => {
+                        let a = http::agent(servers.clone());
+                        *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
+                        let answer = github::ask_magisk(&a, skyward_info::VERSION).map_err(|e| unanswered(&e, github::RESOURCE, &probe, &servers));
+                        tell(Event::MagiskChecked(answer));
+                    }
+                    Task::DownloadMagisk { build, path } => {
+                        let a = http::agent(servers.clone());
+                        *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
+                        let located = github::locate(&a, &build.url, skyward_info::VERSION)
+                            .inspect_err(|e| {
+                                let _ = skyward_sys::kmsg(&format!("asking GitHub where {} is: {e:#}", build.name));
+                            })
+                            .ok();
+                        let mut located_again = false;
+                        let mut refused = |a: &ureq::Agent| {
+                            if located_again {
+                                return Again::Retry;
+                            }
+                            located_again = true;
+                            match github::locate(a, &build.url, skyward_info::VERSION) {
+                                Ok(fresh) => Again::From(build.sources(Some(fresh))),
+                                Err(e) => {
+                                    let _ = skyward_sys::kmsg(&format!("asking GitHub again where {} is: {e:#}", build.name));
+                                    Again::Retry
+                                }
+                            }
+                        };
+                        let sum = Sum::Sha256(build.sha256.clone());
+                        let end = fetch(&servers, build.sources(located), &sum, &build.name, &path, &stopping, &using, &tell, &mut refused);
                         tell(Event::Ended(end));
                     }
                 }

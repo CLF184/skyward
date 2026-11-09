@@ -1,7 +1,8 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
-    SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
+    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, MagiskCheck, Pick, Place,
+    Rows, Screen, SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe,
+    ADDABLE,
     BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
     USB_DRIVE_WANTED, WIPES, installs, starting,
 };
@@ -80,6 +81,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::RestoreBackup => restore_backup(cx),
         Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
+        Screen::Magisk => magisk(cx),
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
@@ -167,6 +169,7 @@ const SPECS: Text = ["全部参数与信息", "全部規格與資訊", "All spec
 const LOGS: Text = ["导出日志", "匯出記錄", "Export logs"];
 const SCREEN_TIMEOUT: Text = ["息屏时间", "螢幕自動關閉", "Screen timeout"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
+const MAGISK: Text = ["刷入 Magisk", "刷入 Magisk", "Flash Magisk"];
 const SKYWARD_UPDATE: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
@@ -2259,6 +2262,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
+        Row::new(l.pick(MAGISK)).icon(ORANGE, Icon::Install),
     ];
     let mut actions = vec![
         Action::Open(Screen::Files),
@@ -2267,6 +2271,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Update),
+        Action::Open(Screen::Magisk),
     ];
     if cx.state.advanced_tools {
         rows.push(Row::new(l.pick(MASS_STORAGE)).icon(BLUE, Icon::Usb));
@@ -2285,6 +2290,135 @@ const RELABEL: Text = ["修复 SELinux 上下文", "修復 SELinux 上下文", "
 const FILESYSTEMS: Text = ["文件系统", "檔案系統", "Filesystems"];
 const STOPPED: Text = ["已停止", "已停止", "Stopped"];
 const STOPPING: Text = ["正在停止", "正在停止", "Stopping"];
+
+/// Magisk APKs in Skyward's shared GitHub resource release, to download and flash
+/// with the package installer.
+pub fn magisk(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let gap = t.m.card_gap;
+    let y = widgets::section_first(&mut c, t, f, top, l.pick(["安装包", "安裝包", "Packages"]));
+    let mut y = match &s.magisk_check {
+        MagiskCheck::Asking => widgets::list(
+            &mut c,
+            t,
+            f,
+            y,
+            &[Row::new(l.pick(["正在获取 Magisk 安装包", "正在取得 Magisk 安裝包", "Getting Magisk packages"])).trail(Trail::None)],
+        )
+        .bottom,
+        MagiskCheck::Failed(why) => {
+            let mut row = Row::new(l.pick(["重新获取", "重新取得", "Try again"]));
+            if !s.online() {
+                row = row.subtitle(l.pick(WLAN_FIRST));
+            }
+            let check = widgets::list(&mut c, t, f, y, &[row]);
+            out.extend(hits(&check.rows, &[Action::CheckMagisk]));
+            widgets::footnote(&mut c, t, f, check.bottom, &fmt::unanswered(l, why))
+        }
+        MagiskCheck::Answered(builds) => {
+            let mut y = if let Some(job) = &s.magisk_job {
+                match (&job.outcome, job.progress) {
+                    (None, progress) => {
+                        let (heading, detail, share) = match progress {
+                            None => (l.pick(GETTING_READY), String::new(), None),
+                            Some(progress) => downloaded(l, progress, job.rate),
+                        };
+                        let y = widgets::progress_card(&mut c, t, f, y, heading, &detail, share);
+                        let stop = widgets::list(
+                            &mut c,
+                            t,
+                            f,
+                            y + gap,
+                            &[Row::new(l.pick(if job.stopping { STOPPING } else { STOP })).trail(Trail::None)],
+                        );
+                        if !job.stopping {
+                            out.extend(hits(&stop.rows, &[Action::StopMagisk]));
+                        }
+                        return Frame::new(t, fit(c, t, stop.bottom), out, l.pick(MAGISK), top);
+                    }
+                    (Some(DownloadEnd::Downloaded), _) => {
+                        let name = &job.build.name;
+                        let detail = l.pick(["已下载并通过 SHA-256 校验", "已下載並通過 SHA-256 驗證", "Downloaded and verified with SHA-256"]);
+                        let y = widgets::list(
+                            &mut c,
+                            t,
+                            f,
+                            y,
+                            &[standing(name, GREEN, Icon::Install, detail)],
+                        )
+                        .bottom;
+                        let row = Row::new(l.pick(["刷入", "刷入", "Flash"])).subtitle(l.pick([
+                            "使用 Skyward 的 ZIP 安装器",
+                            "使用 Skyward 的 ZIP 安裝器",
+                            "Use Skyward's ZIP installer",
+                        ]));
+                        let install = widgets::list(&mut c, t, f, y + gap, &[row]);
+                        out.extend(hits(&install.rows, &[Action::InstallMagisk]));
+                        install.bottom
+                    }
+                    (Some(DownloadEnd::Stopped), _) => {
+                        widgets::footnote(&mut c, t, f, y, l.pick(["已暂停下载。", "已暫停下載。", "Download paused."]))
+                    }
+                    (Some(DownloadEnd::Failed(why)), _) => widgets::footnote(&mut c, t, f, y, &fmt::download_failure(l, why)),
+                }
+            } else {
+                y
+            };
+            let rows: Vec<Row> = builds
+                .iter()
+                .map(|build| {
+                    let size = if build.size == 0 {
+                        l.pick(["GitHub Release 资源", "GitHub Release 資源", "GitHub release asset"]).to_string()
+                    } else {
+                        fmt::file_size(build.size)
+                    };
+                    let subtitle = if s.online() {
+                        size
+                    } else {
+                        format!("{size} · {}", l.pick(WLAN_FIRST))
+                    };
+                    Row::new(&build.name).icon(ORANGE, Icon::Install).subtitle(subtitle).trail(Trail::None)
+                })
+                .collect();
+            let choice = widgets::list(&mut c, t, f, y + gap, &rows);
+            out.extend(hits(&choice.rows, &(0..builds.len()).map(Action::FlashMagisk).collect::<Vec<_>>()));
+            choice.bottom
+        }
+        MagiskCheck::Idle => {
+            let row = widgets::list(
+                &mut c,
+                t,
+                f,
+                y,
+                &[Row::new(l.pick(["连接 WLAN 后获取安装包", "連接 Wi-Fi 後取得安裝包", "Connect to Wi-Fi to get packages"])).trail(Trail::None)],
+            );
+            out.extend(hits(&row.rows, &[Action::CheckMagisk]));
+            row.bottom
+        }
+    };
+    let points = [
+        l.pick([
+            "安装包来自 CLF184/skyward 的 resource Release 资源栏中以 magisk- 开头的 APK。",
+            "安裝包來自 CLF184/skyward 的 resource Release 資源欄中以 magisk- 開頭的 APK。",
+            "Packages come from APKs named magisk-* in the Resources of CLF184/skyward's resource release.",
+        ]),
+        l.pick([
+            "下载后先校验 GitHub 给出的 SHA-256，再作为 ZIP 包交给现有安装器。",
+            "下載後先驗證 GitHub 提供的 SHA-256，再作為 ZIP 檔交給現有安裝器。",
+            "After its GitHub SHA-256 checks out, the APK is given to the existing ZIP installer.",
+        ]),
+        l.pick([
+            "Magisk 的安装结果与所需重启由安装脚本决定。",
+            "Magisk 的安裝結果與所需重新啟動由安裝指令碼決定。",
+            "Magisk's install script decides the result and whether a restart is needed.",
+        ]),
+    ];
+    y = widgets::notes(&mut c, t, f, y + gap, l.pick(NOTES), &points);
+    Frame::new(t, fit(c, t, y), out, l.pick(MAGISK), top)
+}
 
 /// Giving the data partition's files the SELinux labels the installed
 /// system's rules give them: what it does, and a swipe to start it; then

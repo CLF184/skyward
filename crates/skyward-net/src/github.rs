@@ -7,6 +7,9 @@ use serde::Deserialize;
 /// Where GitHub answers which release of Skyward is the newest.
 pub const LATEST: &str = "https://api.github.com/repos/CLF184/skyward/releases/latest";
 
+/// The release whose Resources hold files shared by Skyward builds.
+pub const RESOURCE: &str = "https://github.com/CLF184/skyward/releases/tag/resource";
+
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";
 
@@ -21,14 +24,14 @@ pub struct Newest {
     pub build: Option<Build>,
 }
 
-/// A phone's zip in a release, which holds Skyward's image for the phone.
+/// A file in a release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Build {
-    /// The zip's own name, such as
+    /// The file's own name, such as
     /// skyward-v0.1.4-ishtar-OS3.0.308.0.WMACNXM.zip.
     pub name: String,
-    /// Where GitHub's API hands it out, which [`locate`] asks for where the
-    /// file itself is.
+    /// Where GitHub hands it out, which [`locate`] asks for where the file
+    /// itself is.
     pub url: String,
     /// The release's own link to it on github.com.
     pub link: String,
@@ -38,12 +41,72 @@ pub struct Build {
 }
 
 impl Build {
-    /// Where to download the zip from, in the order to try: the file's own
-    /// short-lived address, where GitHub's API gave one, then the release's
+    /// Where to download the file from, in the order to try: the file's own
+    /// short-lived address, where GitHub gave one, then the release's
     /// link on github.com, which some networks do not reach.
     pub fn sources(&self, located: Option<String>) -> Vec<String> {
         located.into_iter().chain([self.link.clone()]).collect()
     }
+}
+
+/// The Magisk APKs in the Resources section `page` holds, named
+/// `magisk-*.apk`.
+pub fn magisk(page: &str) -> Result<Vec<Build>> {
+    let mut builds = Vec::new();
+    let marker = "/releases/download/";
+    let mut at = 0;
+    while let Some(found) = page[at..].find(marker) {
+        let found = at + found;
+        let href_start = page[..found].rfind("href=\"").context("the Resources section has a file without a link")? + 6;
+        let href_end = page[href_start..].find('"').with_context(|| format!("read the link at byte {href_start}"))? + href_start;
+        let href = &page[href_start..href_end];
+        at = href_end;
+        let name = href.rsplit('/').next().unwrap_or(href);
+        let lower = name.to_ascii_lowercase();
+        if !lower.starts_with("magisk-") || !lower.ends_with(".apk") {
+            continue;
+        }
+        let block_end = page[href_start..].find("</li>").map_or(page.len(), |end| href_start + end);
+        let sha256 = resource_sha256(&page[href_start..block_end]).with_context(|| format!("GitHub gives no SHA-256 of {name}"))?;
+        let link = if href.starts_with("https://") { href.to_string() } else { format!("https://github.com{href}") };
+        builds.push(Build { name: name.to_string(), url: link.clone(), link, size: 0, sha256 });
+    }
+    ensure!(!builds.is_empty(), "the release Resources section has no magisk-*.apk");
+    Ok(builds)
+}
+
+/// The SHA-256 GitHub shows in a Resources section block.
+fn resource_sha256(block: &str) -> Option<String> {
+    let start = block.find("sha256:")? + "sha256:".len();
+    let digest = block.get(start..start + 64)?;
+    (digest.bytes().all(|b| b.is_ascii_hexdigit())).then(|| digest.to_ascii_lowercase())
+}
+
+/// The Resources section of the shared `resource` release.
+fn resources() -> &'static str {
+    "https://github.com/CLF184/skyward/releases/expanded_assets/resource"
+}
+
+/// Ask GitHub for the Magisk APKs in the shared `resource` release.
+pub fn ask_magisk(agent: &ureq::Agent, running: &str) -> Result<Vec<Build>> {
+    let page = read(agent, resources(), running)?;
+    magisk(&page)
+}
+
+/// What `url` answers as text.
+fn read(agent: &ureq::Agent, url: &str, running: &str) -> Result<String> {
+    let mut response = agent
+        .get(url)
+        .header("Accept", "text/html")
+        .header("User-Agent", format!("Skyward/{running}"))
+        .call()
+        .with_context(|| format!("ask {url}"))?;
+    let status = response.status();
+    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {url}"))?;
+    if !status.is_success() {
+        bail!(refusal(status, &body));
+    }
+    Ok(body)
 }
 
 #[derive(Deserialize)]
@@ -237,5 +300,37 @@ mod tests {
         let untagged = ANSWERED_013.replace("\"tag_name\":\"v0.1.3\"", "\"tag_name\":\"nightly\"");
         assert!(newest(&untagged, "ishtar", "0.1.2").is_err());
         assert!(newest("{}", "ishtar", "0.1.2").is_err());
+    }
+
+    const MAGISK_RESOURCES: &str = r#"<ul>
+<li><a href="/CLF184/skyward/releases/download/resource/magisk-alpha-v13.0.apk">Magisk Alpha</a><span>sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</span></li>
+<li><a href="/CLF184/skyward/releases/download/resource/not-magisk.apk">Other</a><span>sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</span></li>
+<li><a href="/CLF184/skyward/releases/download/resource/magisk-official-v31.1.APK">Magisk</a><span>sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc</span></li>
+<li><a href="/CLF184/skyward/releases/download/resource/magisk-sums.txt">Sums</a><span>sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd</span></li>
+</ul>"#;
+
+    #[test]
+    fn the_shared_resources_are_found() {
+        assert_eq!(RESOURCE, "https://github.com/CLF184/skyward/releases/tag/resource");
+        assert_eq!(resources(), "https://github.com/CLF184/skyward/releases/expanded_assets/resource");
+    }
+
+    #[test]
+    fn every_magisk_apk_in_the_release_is_an_option() {
+        let builds = magisk(MAGISK_RESOURCES).unwrap();
+        assert_eq!(builds.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["magisk-alpha-v13.0.apk", "magisk-official-v31.1.APK"]);
+        assert_eq!(
+            builds[0].link,
+            "https://github.com/CLF184/skyward/releases/download/resource/magisk-alpha-v13.0.apk"
+        );
+        assert_eq!(builds[1].sha256, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    }
+
+    #[test]
+    fn a_magisk_apk_needs_a_sha256_and_the_release_needs_one_apk() {
+        let unsummed = MAGISK_RESOURCES.replace("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "not summed");
+        assert_eq!(magisk(&unsummed).unwrap_err().to_string(), "GitHub gives no SHA-256 of magisk-alpha-v13.0.apk");
+        let none = MAGISK_RESOURCES.replace("magisk-", "other-");
+        assert_eq!(magisk(&none).unwrap_err().to_string(), "the release Resources section has no magisk-*.apk");
     }
 }

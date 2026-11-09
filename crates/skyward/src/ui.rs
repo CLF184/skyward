@@ -1411,6 +1411,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Asking GitHub for Skyward's newest release, and updating to it.
     let mut skyward_checker: Option<updates::Worker> = None;
     let mut skyward_updater: Option<updates::Worker> = None;
+    // Asking GitHub for Magisk APKs, and downloading the one chosen.
+    let mut magisk_checker: Option<updates::Worker> = None;
+    let mut magisk_downloader: Option<updates::Worker> = None;
     // The phone sleeps while its screen is off and nothing needs it awake.
     let sleeper = Sleeper::start()?;
     // A uevent may be a charger or a computer attached or taken away: the
@@ -1610,6 +1613,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || downloader.is_some()
             || skyward_checker.is_some()
             || skyward_updater.is_some()
+            || magisk_checker.is_some()
+            || magisk_downloader.is_some()
             || systems_busy;
         let joining = app.state.wlan.as_ref().and_then(|w| w.joined.as_ref()).is_some_and(|j| matches!(j.stage, Joining::Joining | Joining::Addressing));
         let running = match &shell {
@@ -1671,6 +1676,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(u) = &skyward_updater {
             fds.push(u.fd());
+        }
+        if let Some(c) = &magisk_checker {
+            fds.push(c.fd());
+        }
+        if let Some(d) = &magisk_downloader {
+            fds.push(d.fd());
         }
         if let Some(s) = &systems_worker {
             fds.push(s.fd());
@@ -2097,7 +2108,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.download_ended(end, have(&app, &release), now);
                         fetched = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::Writing { .. } => {
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::MagiskChecked(_) | updates::Event::Writing { .. } => {
                         unreachable!("a download asks nothing of its own, and writes nothing")
                     }
                 }
@@ -2117,6 +2128,45 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if asked {
             skyward_checker = None;
+        }
+        let mut magisk_asked = false;
+        if let Some(c) = &magisk_checker {
+            for ev in c.events() {
+                let updates::Event::MagiskChecked(answer) = ev else { unreachable!("asking GitHub downloads nothing") };
+                skyward_sys::kmsg(&format!("GitHub told of the Magisk APKs: {answer:?}"))?;
+                app.magisk_checked(answer);
+                magisk_asked = true;
+            }
+        }
+        if magisk_asked {
+            magisk_checker = None;
+        }
+        let mut magisk_downloaded = false;
+        if let Some(d) = &magisk_downloader {
+            for ev in d.events() {
+                match ev {
+                    updates::Event::Progress(progress, rate) => app.magisk_progress(progress, rate),
+                    updates::Event::Ended(end) => {
+                        let end = match end {
+                            updates::End::Downloaded => DownloadEnd::Downloaded,
+                            updates::End::Stopped => DownloadEnd::Stopped,
+                            updates::End::Failed(why) => DownloadEnd::Failed(why),
+                            updates::End::Updated(_) | updates::End::NotWritten(_) | updates::End::WriteFailed(..) => {
+                                unreachable!("a Magisk APK is only downloaded")
+                            }
+                        };
+                        skyward_sys::kmsg(&format!("downloading Magisk ended: {end:?}"))?;
+                        app.magisk_ended(end, now);
+                        magisk_downloaded = true;
+                    }
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::MagiskChecked(_) | updates::Event::Writing { .. } => {
+                        unreachable!("a Magisk download asks nothing of its own, and writes nothing")
+                    }
+                }
+            }
+        }
+        if magisk_downloaded {
+            magisk_downloader = None;
         }
         let mut updated = false;
         if let Some(u) = &skyward_updater {
@@ -2139,7 +2189,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.skyward_ended(end, now);
                         updated = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) => {
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::MagiskChecked(_) => {
                         unreachable!("an update asks nothing of its own")
                     }
                 }
@@ -2714,6 +2764,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let task = updates::Task::CheckSkyward { probe, codename: cfg.device.codename.clone() };
                         skyward_checker = Some(updates::Worker::start(task, servers.clone())?);
                     }
+                    Effect::CheckMagisk => {
+                        ensure!(magisk_checker.is_none(), "GitHub is being asked already");
+                        let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
+                        let task = updates::Task::CheckMagisk { probe };
+                        magisk_checker = Some(updates::Worker::start(task, servers.clone())?);
+                    }
+                    Effect::DownloadMagisk { build, path } => {
+                        ensure!(magisk_downloader.is_none(), "a Magisk APK is being downloaded already");
+                        ensure!(installer.is_none(), "an installer is running already");
+                        let path = PathBuf::from(path);
+                        let folder = path.parent().context("the Magisk APK has no folder")?;
+                        fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
+                        skyward_sys::kmsg(&format!("downloading Magisk {}", build.name))?;
+                        let task = updates::Task::DownloadMagisk { build, path };
+                        magisk_downloader = Some(updates::Worker::start(task, servers.clone())?);
+                    }
+                    Effect::StopMagisk => magisk_downloader.as_ref().context("no Magisk APK is being downloaded")?.stop(),
                     // The zip goes into the recovery's own folder, which is
                     // in memory, before its image goes into the recovery
                     // partitions.

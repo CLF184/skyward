@@ -62,6 +62,8 @@ pub enum Screen {
     BackupJob,
     /// Tools for the experienced: files, a terminal, the logs.
     Advanced,
+    /// Magisk builds in Skyward's shared resource release, to download and flash.
+    Magisk,
     Files,
     /// One file, and what can be done with it.
     FileInfo,
@@ -180,6 +182,29 @@ pub enum DownloadEnd {
     Failed(Failure),
 }
 
+/// How far asking GitHub for Magisk builds has come.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum MagiskCheck {
+    #[default]
+    Idle,
+    Asking,
+    Failed(Unanswered),
+    Answered(Vec<Build>),
+}
+
+/// Downloading a Magisk build, as the Magisk page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MagiskJob {
+    pub build: Build,
+    /// None until the download has begun.
+    pub progress: Option<Progress>,
+    /// Bytes a second.
+    pub rate: u64,
+    pub outcome: Option<DownloadEnd>,
+    /// Stopping was asked for and is under way.
+    pub stopping: bool,
+}
+
 /// How far asking GitHub for Skyward's newest release has come.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SkywardCheck {
@@ -232,6 +257,13 @@ pub enum SkywardEnd {
 /// Where the full packages downloaded go, from the top of internal
 /// storage: the folder the stock updater keeps them in.
 pub const DOWNLOADS: &str = "downloaded_rom";
+
+/// Where Magisk builds are downloaded before the ZIP installer opens them.
+pub const MAGISK_DOWNLOADS: &str = "/skyward/run/magisk";
+
+pub fn magisk_path(name: &str) -> String {
+    format!("{MAGISK_DOWNLOADS}/{name}")
+}
 
 /// Where the USB drive plugged in is shown.
 pub const USB_DRIVE: &str = "/mnt/usb";
@@ -1329,6 +1361,14 @@ pub enum Action {
     InstallDownloaded,
     /// Ask GitHub for Skyward's newest release.
     CheckSkyward,
+    /// Ask GitHub for the Magisk APKs in Skyward's shared resource release.
+    CheckMagisk,
+    /// Download the Magisk APK at this place in the list, then offer to flash it.
+    FlashMagisk(usize),
+    /// Stop downloading the Magisk APK.
+    StopMagisk,
+    /// Flash the Magisk APK downloaded with the ZIP installer.
+    InstallMagisk,
     /// Download the newest release's build for the phone and write it into
     /// the recovery partitions.
     UpdateSkyward,
@@ -1774,6 +1814,9 @@ pub struct State {
     /// Downloading the newest system's full package, or how that last
     /// ended.
     pub download: Option<DownloadJob>,
+    pub magisk_check: MagiskCheck,
+    /// Downloading a Magisk build, or how that last ended.
+    pub magisk_job: Option<MagiskJob>,
     pub skyward_check: SkywardCheck,
     /// Updating Skyward, or how that last ended.
     pub skyward_job: Option<SkywardJob>,
@@ -1867,6 +1910,8 @@ impl Default for State {
             check: Check::Idle,
             have: Have::Nothing,
             download: None,
+            magisk_check: MagiskCheck::Idle,
+            magisk_job: None,
             skyward_check: SkywardCheck::Idle,
             skyward_job: None,
             traffic: Traffic::default(),
@@ -1938,6 +1983,19 @@ impl State {
         }
     }
 
+    /// The Magisk APKs GitHub gives in Skyward's shared resource release.
+    pub fn magisk_builds(&self) -> &[Build] {
+        match &self.magisk_check {
+            MagiskCheck::Answered(builds) => builds,
+            _ => &[],
+        }
+    }
+
+    /// Whether a Magisk build is being downloaded.
+    pub fn downloading_magisk(&self) -> bool {
+        self.magisk_job.as_ref().is_some_and(|j| j.outcome.is_none())
+    }
+
     /// Whether Skyward is being updated.
     pub fn updating_skyward(&self) -> bool {
         self.skyward_job.as_ref().is_some_and(|j| j.outcome.is_none())
@@ -1950,6 +2008,7 @@ impl State {
         match screen {
             Screen::Wlan => self.wlan.is_some(),
             Screen::SkywardUpdate => self.wlan.is_some() && self.recovery_partitions,
+            Screen::Magisk => self.wlan.is_some(),
             Screen::Systems => self.dual_boot,
             _ => true,
         }
@@ -2171,6 +2230,13 @@ pub enum Effect {
     /// Ask GitHub for Skyward's newest release, telling what it answered
     /// with [`App::skyward_checked`].
     CheckSkyward,
+    /// Ask GitHub for the Magisk APKs in Skyward's shared release, telling
+    /// what it answered with [`App::magisk_checked`].
+    CheckMagisk,
+    /// Download `build` to `path`, telling how it goes with
+    /// [`App::magisk_progress`] and [`App::magisk_ended`].
+    DownloadMagisk { build: Build, path: String },
+    StopMagisk,
     /// Download `build` and write it into the recovery partitions, telling
     /// how it goes with [`App::skyward_progress`] and
     /// [`App::skyward_ended`].
@@ -3849,6 +3915,38 @@ impl App {
         }
     }
 
+    /// What GitHub answered of the Magisk APKs in Skyward's shared release.
+    pub fn magisk_checked(&mut self, answer: Result<Vec<Build>, Unanswered>) {
+        self.state.magisk_check = match answer {
+            Ok(builds) => MagiskCheck::Answered(builds),
+            Err(why) => MagiskCheck::Failed(why),
+        };
+        if self.screen() == Screen::Magisk {
+            self.refresh();
+        }
+    }
+
+    /// How far downloading a Magisk build has come, and how fast it goes,
+    /// in bytes a second.
+    pub fn magisk_progress(&mut self, progress: Progress, rate: u64) {
+        let job = self.state.magisk_job.as_mut().expect("only a Magisk download under way moves on");
+        job.progress = Some(progress);
+        job.rate = rate;
+        if self.screen() == Screen::Magisk {
+            self.refresh();
+        }
+    }
+
+    /// Downloading a Magisk build has ended: its page says how, lit for the
+    /// user to read.
+    pub fn magisk_ended(&mut self, end: DownloadEnd, now: u64) {
+        let job = self.state.magisk_job.as_mut().expect("only a Magisk download under way ends");
+        job.stopping = false;
+        job.outcome = Some(end);
+        self.wake(now);
+        self.refresh();
+    }
+
     /// How far updating Skyward has come, and how fast the download goes,
     /// in bytes a second.
     pub fn skyward_progress(&mut self, stage: SkywardStage, rate: u64) {
@@ -5077,6 +5175,13 @@ impl App {
                 self.state.restore = None;
                 self.state.asking_delete = false;
             }
+            Screen::Magisk => {
+                if self.state.downloading_magisk() {
+                    self.say(l.pick(WAIT_OR_STOP), now);
+                    return fx;
+                }
+                self.state.magisk_job = None;
+            }
             // The page stays while Skyward is updated: once downloaded, the
             // build is written at once, which nothing may cut short.
             Screen::SkywardUpdate => match self.state.skyward_job.as_ref().filter(|j| j.outcome.is_none()).map(|j| j.stage) {
@@ -5292,6 +5397,10 @@ impl App {
                     fx.push(Effect::CheckUpdate);
                 }
                 fx
+            }
+            Screen::Magisk if matches!(self.state.magisk_check, MagiskCheck::Idle | MagiskCheck::Failed(_)) && self.state.online() => {
+                self.state.magisk_check = MagiskCheck::Asking;
+                vec![Effect::CheckMagisk]
             }
             // Skyward's own page asks GitHub the same way.
             Screen::SkywardUpdate if matches!(self.state.skyward_check, SkywardCheck::Idle | SkywardCheck::Failed(_)) && self.state.online() => {
@@ -5861,6 +5970,45 @@ impl App {
                     self.state.skyward_check = SkywardCheck::Asking;
                     self.refresh();
                     return vec![Effect::CheckSkyward];
+                }
+            }
+            Action::CheckMagisk => {
+                if !self.state.online() {
+                    self.open(Screen::Wlan);
+                    return self.arrive_at(Screen::Wlan);
+                }
+                if self.state.magisk_check != MagiskCheck::Asking {
+                    self.state.magisk_check = MagiskCheck::Asking;
+                    self.refresh();
+                    return vec![Effect::CheckMagisk];
+                }
+            }
+            Action::FlashMagisk(k) => {
+                let build = self.state.magisk_builds().get(k).expect("the chosen Magisk build is in the list").clone();
+                if !self.state.online() {
+                    self.open(Screen::Wlan);
+                    return self.arrive_at(Screen::Wlan);
+                }
+                if !self.state.downloading_magisk() {
+                    self.state.magisk_job = Some(MagiskJob { build: build.clone(), progress: None, rate: 0, outcome: None, stopping: false });
+                    self.refresh();
+                    return vec![Effect::DownloadMagisk { path: magisk_path(&build.name), build }];
+                }
+            }
+            Action::StopMagisk => {
+                let job = self.state.magisk_job.as_mut().expect("only a Magisk download under way is stopped");
+                if job.outcome.is_none() && !job.stopping {
+                    job.stopping = true;
+                    self.refresh();
+                    return vec![Effect::StopMagisk];
+                }
+            }
+            Action::InstallMagisk => {
+                let downloaded = self.state.magisk_job.as_ref().and_then(|job| {
+                    (job.outcome == Some(DownloadEnd::Downloaded)).then(|| (magisk_path(&job.build.name), job.build.size))
+                });
+                if let Some((path, size)) = downloaded {
+                    return self.install_opened(path, size, now);
                 }
             }
             // The build goes into the recovery partitions an install may
@@ -7606,6 +7754,7 @@ mod tests {
             Screen::Backup,
             Screen::Restore,
             Screen::Advanced,
+            Screen::Magisk,
             Screen::Files,
             Screen::Terminal,
             Screen::Language,
@@ -11446,6 +11595,49 @@ mod tests {
         app.update_checked(Err(Unanswered::Failed("update.miui.com did not answer".into())), Have::Nothing);
         app.key(Key::Back, 0);
         assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate, Effect::CheckUpdate], "a failed check is tried again");
+    }
+
+    fn magisk_build(name: &str, size: u64, digest: char) -> Build {
+        Build {
+            name: name.into(),
+            url: "https://api.github.com/repos/CLF184/skyward/releases/assets/1".into(),
+            link: format!("https://github.com/CLF184/skyward/releases/download/v0.2.0/{name}"),
+            size,
+            sha256: digest.to_string().repeat(64),
+        }
+    }
+
+    #[test]
+    fn magisk_packages_from_the_newest_release_download_and_open_the_zip_installer() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        app.state.wlan = Some(connected("Skyward"));
+        app.refresh();
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Magisk)), vec![Effect::CheckMagisk]);
+        let alpha = magisk_build("magisk-alpha-v13.0.apk", 12_000_000, 'a');
+        let official = magisk_build("magisk-official-v31.1.apk", 13_000_000, 'b');
+        app.magisk_checked(Ok(vec![alpha.clone(), official]));
+        let hits = app.frame(&f, &i).hits;
+        assert!(hits.iter().any(|h| h.action == Action::FlashMagisk(0)));
+        assert!(hits.iter().any(|h| h.action == Action::FlashMagisk(1)));
+        let path = magisk_path(&alpha.name);
+        assert_eq!(
+            tap(&mut app, &f, &i, Action::FlashMagisk(0)),
+            vec![Effect::DownloadMagisk { build: alpha.clone(), path: path.clone() }]
+        );
+        app.magisk_progress(Progress::Downloading { done: 1_000_000, total: alpha.size }, 500_000);
+        assert!(app.state.downloading_magisk());
+        assert_eq!(tap(&mut app, &f, &i, Action::StopMagisk), vec![Effect::StopMagisk]);
+        app.magisk_ended(DownloadEnd::Stopped, 0);
+        assert_eq!(
+            tap_at(&mut app, &f, &i, Action::FlashMagisk(0), 2000),
+            vec![Effect::DownloadMagisk { build: alpha.clone(), path: path.clone() }],
+            "a stopped download can be started again"
+        );
+        app.magisk_ended(DownloadEnd::Downloaded, 3000);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::InstallMagisk, 5000), vec![Effect::InstallPath(path)]);
+        assert_eq!((app.screen(), app.state.source), (Screen::Installing, Source::Opened { drive: false }));
+        assert_eq!(app.state.package_name.as_deref(), Some(alpha.name.as_str()));
     }
 
     fn skyward_newest(newer: bool) -> Newest {
