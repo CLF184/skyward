@@ -19,6 +19,10 @@
 //! could not do is left unrecorded on purpose, so that the next start tries
 //! again.
 
+// The decision is what the tests are about, and the clearing it decides is
+// done only on Android: a host build has the first and not the second.
+#![cfg_attr(not(target_os = "android"), allow(dead_code))]
+
 #[cfg(target_os = "android")]
 use anyhow::{Context, Result};
 #[cfg(target_os = "android")]
