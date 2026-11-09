@@ -10,11 +10,45 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 const DISK: &str = "/dev/block/sda";
 const GADGET: &str = "/config/usb_gadget/g1";
 const BLKFLSBUF: libc::c_ulong = 0x1261;
+
+/// GPT repair runs off the UI thread so the progress report paints and touches
+/// continue to be handled while disks are released and gdisk writes tables.
+pub struct GptWorker {
+    events: Receiver<Result<Vec<String>, String>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl GptWorker {
+    pub fn start(cfg: DeviceConfig, slot: Option<Slot>) -> Result<Self> {
+        let (tx, events) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("gpt-repair".into())
+            .spawn(move || {
+                let _ = tx.send(repair_gpt(&cfg, slot).map_err(|e| format!("{e:#}")));
+            })
+            .context("start the GPT repair worker")?;
+        Ok(Self { events, thread: Some(thread) })
+    }
+
+    pub fn done(&self) -> Option<Result<Vec<String>, String>> {
+        self.events.try_recv().ok()
+    }
+}
+
+impl Drop for GptWorker {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 /// Export the whole main UFS LUN read/write and keep adb beside it. There is
 /// deliberately no disable action: the recovery is restarted after a safe

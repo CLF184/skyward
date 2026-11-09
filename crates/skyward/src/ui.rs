@@ -1268,6 +1268,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Work on whole partitions under way, and whether the system asked for
     // it before the recovery started.
     let mut part_worker: Option<partwork::Worker> = None;
+    let mut gpt_worker: Option<advanced::GptWorker> = None;
     match &request.work {
         Work::WipeData { reformat } => {
             eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true, reformat.clone())?);
@@ -1595,6 +1596,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || merger.is_some()
             || decryptor.is_some()
             || part_worker.is_some()
+            || gpt_worker.is_some()
             || checker.is_some()
             || downloader.is_some()
             || skyward_checker.is_some()
@@ -1826,6 +1828,27 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             filework::End::Stopped => JobEnd::Stopped,
             filework::End::Failed(why) => JobEnd::Failed(why),
         };
+        if let Some(result) = gpt_worker.as_ref().and_then(advanced::GptWorker::done) {
+            gpt_worker = None;
+            match result {
+                Ok(disks) => {
+                    let count = disks.len();
+                    let message = match app.state.lang {
+                        Lang::Hans => format!("已修复 {count} 个 GPT。请重启 recovery 后再挂载分区。"),
+                        Lang::Hant => format!("已修復 {count} 個 GPT。請重新啟動 recovery 後再掛載分割區。"),
+                        Lang::En => format!("Repaired {count} GPTs. Restart recovery before mounting partitions."),
+                    };
+                    app.report(&message, now);
+                }
+                Err(e) => {
+                    skyward_sys::kmsg(&format!("GPT repair failed: {e}"))?;
+                    app.report(
+                        &format!("{}: {e}", app.state.lang.pick(["修复 GPT 失败", "修復 GPT 失敗", "GPT repair failed"])),
+                        now,
+                    );
+                }
+            }
+        }
         let mut worked = false;
         if let Some(w) = &worker {
             for ev in w.events() {
@@ -2015,6 +2038,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || eraser.is_some()
             || backuper.is_some()
             || part_worker.is_some()
+            || gpt_worker.is_some()
             || systems_worker.as_ref().is_some_and(systems::Worker::busy);
         if !metadata_busy {
             if let Some(due) = keeper.due(app.settings(), now) {
@@ -2470,6 +2494,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                                 && installer.is_none()
                                 && backuper.is_none()
                                 && part_worker.is_none()
+                                && gpt_worker.is_none()
                                 && worker.is_none(),
                             "other work is under way"
                         );
@@ -2534,27 +2559,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             app.state.lang.pick(["正在修复 GPT…", "正在修復 GPT…", "Repairing GPT…"]),
                             now,
                         );
-                        match advanced::repair_gpt(cfg, info.slot) {
-                            Ok(disks) => {
-                                let count = disks.len();
-                                let message = match app.state.lang {
-                                    Lang::Hans => format!("已修复 {count} 个 GPT。请重启 recovery 后再挂载分区。"),
-                                    Lang::Hant => format!("已修復 {count} 個 GPT。請重新啟動 recovery 後再掛載分割區。"),
-                                    Lang::En => format!("Repaired {count} GPTs. Restart recovery before mounting partitions."),
-                                };
-                                app.report(&message, now)
-                            }
-                            Err(e) => {
-                                skyward_sys::kmsg(&format!("GPT repair failed: {e:#}"))?;
-                                app.report(
-                                    &format!(
-                                        "{}: {e:#}",
-                                        app.state.lang.pick(["修复 GPT 失败", "修復 GPT 失敗", "GPT repair failed"])
-                                    ),
-                                    now,
-                                );
-                            }
-                        }
+                        gpt_worker = Some(advanced::GptWorker::start(cfg.clone(), info.slot)?);
                     }
                     // The data partition made afresh as another filesystem
                     // is a factory reset, as the system asks for one; the

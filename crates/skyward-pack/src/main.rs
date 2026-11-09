@@ -139,6 +139,10 @@ fn main() -> Result<()> {
                     ensure!(hex(&Sha256::digest(data)) == sum, "the bundled {path} is not the tested file");
                     rd.add(path, 0o644, data.to_vec())?;
                 }
+                for (path, data, sum) in PIANO_TOUCH_FIRMWARE {
+                    ensure!(hex(&Sha256::digest(data)) == sum, "the bundled {path} is not the tested file");
+                    rd.add(path, 0o644, data.to_vec())?;
+                }
                 for (path, data, mode) in PIANO_EXTRA {
                     rd.add(path, mode, data.to_vec())?;
                 }
@@ -154,6 +158,15 @@ fn main() -> Result<()> {
                     }
                 }
                 rd.link("piano/binder/lib64/libbinder.so", "/system/lib64/libbinder.so")?;
+                rd.link("piano/odm/firmware/o8", "/piano/firmware/o8")?;
+                rd.link(
+                    "piano/odm/firmware/piano_nova_boe_thp_config.ini",
+                    "/piano/firmware/o8/piano_nova_boe_thp_config.ini",
+                )?;
+                rd.link(
+                    "piano/odm/firmware/piano_nova_csot_thp_config.ini",
+                    "/piano/firmware/o8/piano_nova_csot_thp_config.ini",
+                )?;
                 rd.add(PIANO_TOUCH_BINARY_PATH, 0o755, PIANO_TOUCH_BINARY.to_vec())?;
                 rd.add(PIANO_GDISK_PATH, 0o755, PIANO_GDISK.to_vec())?;
                 ensure!(hex(&Sha256::digest(PIANO_DMCTL)) == PIANO_DMCTL_SHA256, "the bundled piano dmctl is not the reference binary");
@@ -303,6 +316,18 @@ const PIANO_TOUCH: [(&str, &[u8], &str); 6] = [
         "piano/odm/lib64/libtensorflowlite_touch_c.so",
         include_bytes!("../../../resources/piano/odm/lib64/libtensorflowlite_touch_c.so"),
         "22226ab82e34c88e69d808a63ec0952d1a83065a64173020b6f562d28a2dfb20",
+    ),
+];
+const PIANO_TOUCH_FIRMWARE: [(&str, &[u8], &str); 2] = [
+    (
+        "piano/odm/firmware/MP_Setting_Criteria_59B0.csv",
+        include_bytes!("../../../resources/piano/odm/firmware/MP_Setting_Criteria_59B0.csv"),
+        "3900286917c2f89ccc0d42299ed948e503676f7ee5210eae927ff9bf749f5294",
+    ),
+    (
+        "piano/odm/firmware/MP_Setting_Criteria_59BB.csv",
+        include_bytes!("../../../resources/piano/odm/firmware/MP_Setting_Criteria_59BB.csv"),
+        "d4100bd1613aba115cae0295d0d2754d6897566b0568b0ff0e172238aeb0130e",
     ),
 ];
 const PIANO_EXTRA: [(&str, &[u8], u32); 17] = [
