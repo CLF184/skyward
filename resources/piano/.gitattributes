@@ -1,0 +1,4 @@
+*.sh text eol=lf
+*.rc text eol=lf
+firmware/o8/*.ini text eol=lf
+modules/modules.dep text eol=lf

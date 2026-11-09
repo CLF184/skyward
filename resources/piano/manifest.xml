@@ -1,0 +1,12 @@
+<!--
+    Gatekeeper is the one secure service piano's vendor manifest keeps outside
+    its VINTF fragment directory. Skyward copies the KeyMint, Weaver and boot
+    fragments itself; declaring those here as well makes servicemanager reject
+    the whole manifest for duplicate instances.
+-->
+<manifest version="1.0" type="device">
+    <hal format="aidl">
+        <name>android.hardware.gatekeeper</name>
+        <fqname>IGatekeeper/default</fqname>
+    </hal>
+</manifest>

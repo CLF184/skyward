@@ -1,0 +1,2 @@
+xiaomi_touch.ko:
+nt36532_touch.ko: xiaomi_touch.ko

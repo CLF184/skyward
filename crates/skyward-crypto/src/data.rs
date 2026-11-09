@@ -204,7 +204,7 @@ pub struct Opening {
 /// belong to no one user and of each user's files readable before they
 /// sign in, and open the own files of every user who set no screen lock
 /// and, behind the owner's, of those whose credential the phone made up.
-pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
+pub fn open_without_credential(service: &KeyMint, weaver: Option<crate::weaver::Config>) -> Result<Opening> {
     let mounted = match mount::is_mount_point(Path::new(MOUNT))? {
         true => None,
         false => Some(open(service)?),
@@ -216,7 +216,7 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         let protector = protector(user)?;
         match protector.lock {
             None => {
-                let note = open_user_files(service, user, None, None)?;
+                let note = open_user_files(service, user, None, None, weaver)?;
                 if user == OWNER {
                     owner = note;
                 }
@@ -224,17 +224,17 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
             Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
-    Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
+    Ok(Opening { mounted, closed: open_made_up(service, closed, &owner, weaver) })
 }
 
 /// Open the own files of `user` with what they typed at their screen lock
 /// and, where `user` is the owner, of each of `closed` whose credential
 /// the phone made up behind theirs; give those still closed.
-pub fn unlock(service: &KeyMint, closed: &[Closed], user: u32, credential: &[u8]) -> Result<Vec<Closed>> {
-    let note = open_user_files(service, user, Some(credential), None)?;
+pub fn unlock(service: &KeyMint, closed: &[Closed], user: u32, credential: &[u8], weaver: Option<crate::weaver::Config>) -> Result<Vec<Closed>> {
+    let note = open_user_files(service, user, Some(credential), None, weaver)?;
     let rest = closed.iter().filter(|c| c.user != user).cloned().collect();
     Ok(match user == OWNER {
-        true => open_made_up(service, rest, &note),
+        true => open_made_up(service, rest, &note, weaver),
         false => rest,
     })
 }
@@ -243,7 +243,7 @@ pub fn unlock(service: &KeyMint, closed: &[Closed], user: u32, credential: &[u8]
 /// up, behind `owner`, the note the owner's own secret gave; give those
 /// still closed, a made-up one with why it did not open. Where the secure
 /// world wrote no note, none of them is tried and each is left with why.
-fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: &Note) -> Vec<Closed> {
+fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: &Note, weaver: Option<crate::weaver::Config>) -> Vec<Closed> {
     let Some(token) = &owner.token else {
         return closed
             .into_iter()
@@ -257,7 +257,7 @@ fn open_made_up(service: &KeyMint, closed: Vec<Closed>, owner: &Note) -> Vec<Clo
         .into_iter()
         .filter_map(|c| match c.made_up {
             false => Some(c),
-            true => match open_user_files(service, c.user, None, Some(token)) {
+            true => match open_user_files(service, c.user, None, Some(token), weaver) {
                 Ok(_) => None,
                 Err(e) => Some(Closed { why: Some(format!("{e:#}")), ..c }),
             },
@@ -466,7 +466,7 @@ const TAG_BYTES: usize = 16;
 /// none, and a user the phone made one up for needs `owner`, the note the
 /// owner's own secret gave. The owner's files open, their shared storage
 /// shows at /sdcard.
-fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Note> {
+fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>, weaver: Option<crate::weaver::Config>) -> Result<Note> {
     let protector = protector(user)?;
     let stretched = match &protector.lock {
         Some(lock) => {
@@ -486,7 +486,7 @@ fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owne
         // the secret is then guarded by nothing else.
         (Bound::Weaver(slot), _) => {
             let binder = Binder::open()?;
-            let weaver = Weaver::open(&binder)?;
+            let weaver = Weaver::open(&binder)?.with_config(weaver);
             let key = crate::user::weaver_key(&stretched, weaver.config()?.key_bytes)?;
             let value = weaver.read(*slot, &key)?;
             (crate::user::weaver_protector_secret(&stretched, &value), None)

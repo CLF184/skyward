@@ -115,7 +115,55 @@ fn main() -> Result<()> {
                 anyhow::bail!("{} holds {}, which is not a stock recovery", stock.display(), e.name);
             }
             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
-            skyward_config::DeviceConfig::load(&config)?;
+            let cfg = skyward_config::DeviceConfig::load(&config)?;
+            if let Some(expected) = &cfg.stock {
+                let sum = format!("{:x}", Sha256::digest(std::fs::read(&stock)?));
+                ensure!(
+                    sum == expected.recovery,
+                    "stock recovery SHA-256 {sum} does not match {} for {}",
+                    expected.recovery,
+                    cfg.device.codename
+                );
+            }
+            if cfg.device.codename == "piano" {
+                prune_piano_stock(&mut rd);
+                ensure!(
+                    hex(&Sha256::digest(PIANO_GDISK)) == PIANO_GDISK_SHA256,
+                    "the bundled piano gdisk is not the tested binary"
+                );
+                ensure!(
+                    hex(&Sha256::digest(PIANO_GDISK_UUID)) == PIANO_GDISK_UUID_SHA256,
+                    "the bundled piano UUID library is not the tested library"
+                );
+                for (path, data, sum) in PIANO_TOUCH {
+                    ensure!(hex(&Sha256::digest(data)) == sum, "the bundled {path} is not the tested file");
+                    rd.add(path, 0o644, data.to_vec())?;
+                }
+                for (path, data, mode) in PIANO_EXTRA {
+                    rd.add(path, mode, data.to_vec())?;
+                }
+                for (path, data) in PIANO_SECURE {
+                    rd.add(path, 0o755, data.to_vec())?;
+                }
+                for (path, data, sum) in PIANO_SECURE_LIBS {
+                    ensure!(hex(&Sha256::digest(data)) == sum, "the bundled {path} is not the tested library");
+                    if rd.find(path).is_some() {
+                        rd.replace(path, data.to_vec())?;
+                    } else {
+                        rd.add(path, 0o644, data.to_vec())?;
+                    }
+                }
+                rd.link("piano/binder/lib64/libbinder.so", "/system/lib64/libbinder.so")?;
+                rd.add(PIANO_TOUCH_BINARY_PATH, 0o755, PIANO_TOUCH_BINARY.to_vec())?;
+                rd.add(PIANO_GDISK_PATH, 0o755, PIANO_GDISK.to_vec())?;
+                ensure!(hex(&Sha256::digest(PIANO_DMCTL)) == PIANO_DMCTL_SHA256, "the bundled piano dmctl is not the reference binary");
+                rd.add("system/bin/dmctl", 0o755, PIANO_DMCTL.to_vec())?;
+                if rd.find(PIANO_GDISK_UUID_PATH).is_some() {
+                    rd.replace(PIANO_GDISK_UUID_PATH, PIANO_GDISK_UUID.to_vec())?;
+                } else {
+                    rd.add(PIANO_GDISK_UUID_PATH, 0o644, PIANO_GDISK_UUID.to_vec())?;
+                }
+            }
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
             // among its programs, and its unzip there too, a link to ziptool
@@ -135,6 +183,7 @@ fn main() -> Result<()> {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
             rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
+            configure_init(&mut rd, &cfg)?;
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
@@ -163,8 +212,157 @@ fn main() -> Result<()> {
     }
 }
 
+/// Apply declarative init settings without a separate device ramdisk tree.
+fn configure_init(rd: &mut Ramdisk, config: &skyward_config::DeviceConfig) -> Result<()> {
+    let remoteproc = config.firmware.as_ref().is_some_and(|f| f.remoteproc.is_some());
+    if !remoteproc && config.init.writes.is_empty() && config.init.properties.is_empty() {
+        return Ok(());
+    }
+    let path = "init.recovery.qcom.rc";
+    let original = &rd.find(path).context("the stock ramdisk has no Qualcomm recovery init")?.data;
+    let mut text = String::from_utf8(original.clone()).context("Qualcomm recovery init is not UTF-8")?;
+    if config.device.codename == "piano" {
+        let legacy_adsp = "    wait /sys/kernel/boot_adsp/ssr\n    write /sys/kernel/boot_adsp/ssr 1\n    wait /sys/class/power_supply/battery\n";
+        ensure!(text.matches(legacy_adsp).count() == 1, "piano stock init has no legacy ADSP startup block");
+        text = text.replace(legacy_adsp, "");
+    }
+    if remoteproc {
+        // This stock init uses the pre-remoteproc ADSP loader. Keep its
+        // firmware mounts and battery wait, replacing only the obsolete
+        // loader with the recovery binary's firmware command.
+        let wait = "    wait /sys/kernel/boot_adsp/boot\n";
+        let boot = "    write /sys/kernel/boot_adsp/boot 1\n";
+        ensure!(text.matches(wait).count() == 1 && text.matches(boot).count() == 1,
+            "stock init does not contain the expected legacy ADSP loader");
+        text = text.replace(wait, "    exec_start skyward-firmware\n").replace(boot, "");
+        // The recovery basename enters the UI directly. The same binary
+        // under its CLI name accepts the early firmware subcommand.
+        rd.link("system/bin/skyward", "recovery")?;
+        text.push_str("\nservice skyward-firmware /system/bin/skyward firmware\n    user root\n    group root system drmrpc input\n    disabled\n    oneshot\n    seclabel u:r:recovery:s0\n");
+    }
+    if !config.init.writes.is_empty() || !config.init.properties.is_empty() {
+        text.push_str("\non init\n");
+        for write in &config.init.writes {
+            text.push_str(&format!("    write {} {}\n", write.path, write.value));
+        }
+        let mut properties: Vec<_> = config.init.properties.iter().collect();
+        properties.sort_by_key(|(name, _)| *name);
+        for (name, value) in properties {
+            text.push_str(&format!("    setprop {name} {value}\n"));
+        }
+        if config.device.codename == "piano" {
+            text.push_str("    start piano_touch\n\n");
+            text.push_str(include_str!("../../../resources/piano/init.recovery.piano.rc"));
+        }
+    }
+    rd.replace(path, text.into_bytes())
+}
+
 /// The partition a recovery is made on, as a full update package names it.
 const RECOVERY: &str = "recovery";
+
+/// The tested ARM64 gdisk from the piano Fix GPT recovery, and the UUID
+/// library it needs. Skyward runs the same x/j/k/w sequence as that image.
+const PIANO_GDISK_PATH: &str = "system/bin/gdisk";
+const PIANO_GDISK_UUID_PATH: &str = "system/lib64/libext2_uuid.so";
+const PIANO_GDISK: &[u8] = include_bytes!("../../../resources/piano/gdisk");
+const PIANO_GDISK_UUID: &[u8] = include_bytes!("../../../resources/piano/libext2_uuid.so");
+const PIANO_DMCTL: &[u8] = include_bytes!("../../../resources/piano/dmctl");
+const PIANO_DMCTL_SHA256: &str = "c6fa26b4b199eb1ee1798cdf71d2c34659d4ca6ecfa7d2d3686637c2900454cb";
+const PIANO_GDISK_SHA256: &str = "3ecffce384482b47fc76742f404a125c652a892f3f370603e9023eb06ee56751";
+const PIANO_GDISK_UUID_SHA256: &str = "a0560f406c35679ce9c0c644b243dd9588f83e05f8dbed4128604c182b4b197f";
+const PIANO_TOUCH_BINARY_PATH: &str = "piano/odm/bin/touch_report";
+const PIANO_TOUCH_BINARY: &[u8] = include_bytes!("../../../resources/piano/odm/bin/touch_report");
+const PIANO_TOUCH: [(&str, &[u8], &str); 6] = [
+    (
+        "piano/odm/lib64/libtouchreport.so",
+        include_bytes!("../../../resources/piano/odm/lib64/libtouchreport.so"),
+        "8fb3433f7f251b4b9ab79b563b79c29fa68f38e4b4feb5e0f327b1812c7f72b5",
+    ),
+    (
+        "piano/odm/lib64/libtouchreport_alg.so",
+        include_bytes!("../../../resources/piano/odm/lib64/libtouchreport_alg.so"),
+        "26f86f74781e70d03958271b100b31865d3eb80b69f30774ce1b1e25cb24f1c9",
+    ),
+    (
+        "piano/odm/lib64/libtouchreport_hal.so",
+        include_bytes!("../../../resources/piano/odm/lib64/libtouchreport_hal.so"),
+        "0cc145e5bc55b7c1fa6d59a9995e6cf315c625a1f029b800f04d075346a075ca",
+    ),
+    (
+        "piano/odm/lib64/libtouchreport_sensor.so",
+        include_bytes!("../../../resources/piano/odm/lib64/libtouchreport_sensor.so"),
+        "76e67a56ed7129fdb0ac99c6ce7abe1f98745f8e45e8a27b819efab72cabfed3",
+    ),
+    (
+        "piano/odm/lib64/sensors.touch.detect.so",
+        include_bytes!("../../../resources/piano/odm/lib64/sensors.touch.detect.so"),
+        "aff2858f932c33050f80312c55d8689bfd68bfd830f83d578a83b2ee9327a529",
+    ),
+    (
+        "piano/odm/lib64/libtensorflowlite_touch_c.so",
+        include_bytes!("../../../resources/piano/odm/lib64/libtensorflowlite_touch_c.so"),
+        "22226ab82e34c88e69d808a63ec0952d1a83065a64173020b6f562d28a2dfb20",
+    ),
+];
+const PIANO_EXTRA: [(&str, &[u8], u32); 17] = [
+    ("piano/odm/firmware/film_model.tflite", include_bytes!("../../../resources/piano/odm/firmware/film_model.tflite"), 0o644),
+    ("piano/odm/firmware/palm_check.tflite", include_bytes!("../../../resources/piano/odm/firmware/palm_check.tflite"), 0o644),
+    ("piano/bin/piano-load-touch.sh", include_bytes!("../../../resources/piano/piano-load-touch.sh"), 0o755),
+    ("piano/bin/piano-boot-adsp.sh", include_bytes!("../../../resources/piano/piano-boot-adsp.sh"), 0o755),
+    ("piano/bin/piano-fixgpt-unmount.sh", include_bytes!("../../../resources/piano/piano-fixgpt-unmount.sh"), 0o755),
+    ("piano/bin/piano-msc-start.sh", include_bytes!("../../../resources/piano/piano-msc-start.sh"), 0o755),
+    ("piano/bin/piano-msc-unmount.sh", include_bytes!("../../../resources/piano/piano-msc-unmount.sh"), 0o755),
+    ("piano/piano-vintf.xml", include_bytes!("../../../resources/piano/manifest.xml"), 0o644),
+    ("piano/lib/modules/xiaomi_touch.ko", include_bytes!("../../../resources/piano/modules/xiaomi_touch.ko"), 0o644),
+    ("piano/lib/modules/nt36532_touch.ko", include_bytes!("../../../resources/piano/modules/nt36532_touch.ko"), 0o644),
+    ("piano/lib/modules/modules.dep", include_bytes!("../../../resources/piano/modules/modules.dep"), 0o644),
+    ("piano/firmware/o8/novatek_nt36532_piano_fw_boe.bin", include_bytes!("../../../resources/piano/firmware/o8/novatek_nt36532_piano_fw_boe.bin"), 0o644),
+    ("piano/firmware/o8/novatek_nt36532_piano_fw_csot.bin", include_bytes!("../../../resources/piano/firmware/o8/novatek_nt36532_piano_fw_csot.bin"), 0o644),
+    ("piano/firmware/o8/novatek_nt36532_piano_mp_boe.bin", include_bytes!("../../../resources/piano/firmware/o8/novatek_nt36532_piano_mp_boe.bin"), 0o644),
+    ("piano/firmware/o8/novatek_nt36532_piano_mp_csot.bin", include_bytes!("../../../resources/piano/firmware/o8/novatek_nt36532_piano_mp_csot.bin"), 0o644),
+    ("piano/firmware/o8/piano_nova_boe_thp_config.ini", include_bytes!("../../../resources/piano/firmware/o8/piano_nova_boe_thp_config.ini"), 0o644),
+    ("piano/firmware/o8/piano_nova_csot_thp_config.ini", include_bytes!("../../../resources/piano/firmware/o8/piano_nova_csot_thp_config.ini"), 0o644),
+];
+const PIANO_SECURE: [(&str, &[u8]); 8] = [
+    ("piano/bin/piano-qseecomd", include_bytes!("../../../resources/piano/bin/piano-qseecomd")),
+    ("piano/bin/piano-minkdaemon", include_bytes!("../../../resources/piano/bin/piano-minkdaemon")),
+    ("piano/bin/piano-ssgtzd", include_bytes!("../../../resources/piano/bin/piano-ssgtzd")),
+    ("piano/bin/piano-qwesd", include_bytes!("../../../resources/piano/bin/piano-qwesd")),
+    ("piano/bin/piano-keymint", include_bytes!("../../../resources/piano/bin/piano-keymint")),
+    ("piano/bin/piano-gatekeeper", include_bytes!("../../../resources/piano/bin/piano-gatekeeper")),
+    ("piano/bin/piano-weaver-hos3", include_bytes!("../../../resources/piano/bin/piano-weaver-hos3")),
+    ("piano/bin/piano-weaver-hos4", include_bytes!("../../../resources/piano/bin/piano-weaver-hos4")),
+];
+const PIANO_SECURE_LIBS: [(&str, &[u8], &str); 2] = [
+    (
+        "system/lib64/libvndksupport.so",
+        include_bytes!("../../../resources/piano/libvndksupport.so"),
+        "448ee8d7be3a030bcc30a791a77b77628e8314b7b5aa28f70437cc3a1bd04a8a",
+    ),
+    (
+        "system/lib64/libdl_android.so",
+        include_bytes!("../../../resources/piano/libdl_android.so"),
+        "739c5716653bcff6700501d98f576957fc299e4f2483c3ad2bd1c0f641e96422",
+    ),
+];
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The piano bootloader rejects a compressed recovery ramdisk above about
+/// 29.2 MB. These entries belong only to the replaced stock recovery UI and
+/// its sideload engine; Skyward has its own UI, installer and update path.
+fn prune_piano_stock(rd: &mut Ramdisk) {
+    rd.entries.retain(|e| {
+        e.name != "res"
+            && !e.name.starts_with("res/")
+            && e.name != "system/lib64/librecovery_ui.so"
+            && e.name != "system/lib64/librecovery_ui_ext.so"
+            && e.name != "system/bin/update_engine_sideload"
+    });
+}
 
 /// Take the recovery partition out of the stock build's full update package
 /// on its server, reading only what that partition takes of it, and write it
@@ -279,6 +477,35 @@ fn list(image: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remoteproc_replaces_only_the_legacy_loader_and_keeps_stock_init() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        let stock = b"# stock licence\non init\n    setprop sys.usb.configfs 1\non fs\n    mount_all /vendor/etc/charger_fstab.qti --early\n    wait /sys/kernel/boot_adsp/boot\n    write /sys/kernel/boot_adsp/boot 1\n    wait /sys/class/power_supply/battery\n";
+        rd.add("init.recovery.qcom.rc", 0o640, stock.to_vec()).unwrap();
+        let cfg = skyward_config::DeviceConfig::parse(include_str!("../../../devices/sheng.toml")).unwrap();
+        configure_init(&mut rd, &cfg).unwrap();
+        let init = rd.find("init.recovery.qcom.rc").unwrap();
+        let text = std::str::from_utf8(&init.data).unwrap();
+        assert!(text.starts_with("# stock licence\non init\n    setprop sys.usb.configfs 1\n"));
+        assert!(text.contains("    mount_all /vendor/etc/charger_fstab.qti --early\n"));
+        assert!(text.contains("    wait /sys/class/power_supply/battery\n"));
+        assert!(!text.contains("/sys/kernel/boot_adsp/boot"));
+        assert!(text.contains("exec_start skyward-firmware"));
+        assert_eq!(init.mode & 0o777, 0o640);
+        assert_eq!(rd.find("system/bin/skyward").unwrap().data, b"recovery");
+        assert!(!rd.entries.iter().any(|e| e.name.ends_with(".sh")), "no device scripts are added");
+        assert!(configure_init(&mut rd, &cfg).is_err(), "an unexpected init layout must fail rather than pack silently");
+    }
+
+    #[test]
+    fn existing_phone_init_is_unchanged() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add("init.recovery.qcom.rc", 0o644, b"stock".to_vec()).unwrap();
+        let cfg = skyward_config::DeviceConfig::parse(include_str!("../../../devices/fuxi.toml")).unwrap();
+        configure_init(&mut rd, &cfg).unwrap();
+        assert_eq!(rd.find("init.recovery.qcom.rc").unwrap().data, b"stock");
+    }
 
     #[test]
     fn the_lines_that_set_a_name_are_the_only_ones_left_out() {

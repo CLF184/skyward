@@ -5,11 +5,15 @@ use skyward_sys::ueventd;
 use skyward_vab::Mounted;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{chown, FileTypeExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,6 +24,20 @@ const RESTART_DELAY: Duration = Duration::from_secs(1);
 /// How long a program gets to become what it says it will be.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(100);
+
+struct Socket {
+    path: PathBuf,
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Paths stopped for disk work. Hold the lock while spawning so a stopped
+/// service cannot slip past the process scan by starting concurrently.
+static STOPPED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// Where the kernel says the highest capability it knows.
 const CAP_LAST_CAP: &str = "/proc/sys/kernel/cap_last_cap";
@@ -50,14 +68,18 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
         }
         let who = Credentials::of(&s, &known)?;
         if s.oneshot {
-            let status = command(&s, &who).status().with_context(|| format!("run {}", s.path))?;
+            let status = command(&s, &who)?.status().with_context(|| format!("run {}", s.path))?;
             ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
             skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
             continue;
         }
+        let sockets = s.sockets.iter().map(|socket| {
+            let id = |name: &str| ueventd::account(&known, name).with_context(|| format!("unknown socket account {name}"));
+            Ok((socket.clone(), id(&socket.user)?, id(&socket.group)?))
+        }).collect::<Result<Vec<_>>>()?;
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
-        thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
+        thread::Builder::new().name(name).spawn(move || supervise(&s, &who, &sockets)).context("start a supervising thread")?;
         ready(&waiting)?;
     }
     Ok(())
@@ -165,22 +187,18 @@ fn ready(s: &Service) -> Result<()> {
     };
     let until = Instant::now() + READY_TIMEOUT;
     loop {
-        if let Some(name) = &s.ready_property {
-            if skyward_sys::prop(name).is_some_and(|v| !v.is_empty()) {
-                return Ok(());
-            }
-        }
-        // Either directory may itself be starting again, and until it
-        // answers nothing can be looked up in it.
-        if let Some(name) = &s.ready_service {
-            if registered(name) {
-                return Ok(());
-            }
-        }
-        if let Some(name) = &s.ready_hardware_service {
-            if registered_hardware(name) {
-                return Ok(());
-            }
+        let property = s.ready_property.as_deref().and_then(skyward_sys::prop);
+        let ready = if let Some(expected) = &s.ready_property_value {
+            property.as_ref() == Some(expected)
+                && s.ready_service.as_deref().is_none_or(registered)
+                && s.ready_hardware_service.as_deref().is_none_or(registered_hardware)
+        } else {
+            property.is_some_and(|v| !v.is_empty())
+                || s.ready_service.as_deref().is_some_and(registered)
+                || s.ready_hardware_service.as_deref().is_some_and(registered_hardware)
+        };
+        if ready {
+            return Ok(());
         }
         if Instant::now() >= until {
             bail!("{} {waited_on} in {} seconds", s.path, READY_TIMEOUT.as_secs());
@@ -189,12 +207,23 @@ fn ready(s: &Service) -> Result<()> {
     }
 }
 
-fn supervise(s: &Service, who: &Credentials) -> ! {
+fn supervise(s: &Service, who: &Credentials, sockets: &[(skyward_config::ServiceSocket, u32, u32)]) {
     loop {
+        if STOPPED.lock().expect("stopped service paths").contains(&s.path) {
+            return;
+        }
+        if s.data_directory.is_some() && !skyward_block::mount::is_mount_point(Path::new("/data")).unwrap_or(false) {
+            thread::sleep(READY_POLL);
+            continue;
+        }
         let started = Instant::now();
         let ended = match running(&s.path) {
             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
-            None => run(s, who),
+            None => match run(s, who, sockets) {
+                Ok(Some(how)) => Ok(how),
+                Ok(None) => return,
+                Err(e) => Err(e),
+            },
         };
         let line = match ended {
             Ok(how) => format!("{}: {how}", s.path),
@@ -207,27 +236,169 @@ fn supervise(s: &Service, who: &Credentials) -> ! {
     }
 }
 
+/// Stop the phone's services and keep their supervisors from starting them
+/// again. This is for work that exports or rewrites the whole UFS disk: the
+/// recovery must be restarted before those services are used again.
+pub fn stop_all(services: &[Service]) -> Result<()> {
+    let paths: Vec<&Path> = services.iter().filter(|s| !s.oneshot).map(|s| Path::new(&s.path)).collect();
+    STOPPED.lock().expect("stopped service paths").extend(
+        services.iter().filter(|s| !s.oneshot).map(|s| s.path.clone()),
+    );
+    let mut pids = Vec::new();
+    for path in paths {
+        pids.extend(running_all(path)?);
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in &pids {
+        let ended = unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) };
+        if ended != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("stop process {pid}"));
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(3);
+    while pids.iter().any(|pid| Path::new(&format!("/proc/{pid}")).exists()) {
+        if Instant::now() >= until {
+            for pid in &pids {
+                if Path::new(&format!("/proc/{pid}")).exists() {
+                    unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+                }
+            }
+            break;
+        }
+        thread::sleep(READY_POLL);
+    }
+    for pid in &pids {
+        let until = Instant::now() + Duration::from_secs(1);
+        while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < until {
+            thread::sleep(READY_POLL);
+        }
+        ensure!(!Path::new(&format!("/proc/{pid}")).exists(), "process {pid} did not stop");
+    }
+    Ok(())
+}
+
 /// Start the program and wait for it to end.
-fn run(s: &Service, who: &Credentials) -> Result<String> {
-    let mut child = command(s, who).spawn().with_context(|| format!("start {}", s.path))?;
+fn run(s: &Service, who: &Credentials, sockets: &[(skyward_config::ServiceSocket, u32, u32)]) -> Result<Option<String>> {
+    let stopped = STOPPED.lock().expect("stopped service paths");
+    if stopped.contains(&s.path) {
+        return Ok(None);
+    }
+    if let Some(dir) = &s.data_directory {
+        fs::create_dir_all(dir).with_context(|| format!("make {dir}"))?;
+        chown(dir, Some(who.uid), Some(who.gid))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+        let status = Command::new("/system/bin/restorecon").args(["-R", dir]).status()
+            .with_context(|| format!("restore the label of {dir}"))?;
+        ensure!(status.success(), "restorecon {dir} ended {status}");
+    }
+    let mut cmd = command(s, who)?;
+    let mut bound = Vec::with_capacity(sockets.len());
+    let mut descriptors = Vec::with_capacity(sockets.len());
+    for (socket, uid, gid) in sockets {
+        let (path, descriptor) = bind_socket(socket, *uid, *gid).with_context(|| format!("bind {}", socket.name))?;
+        let fd = descriptor.as_raw_fd();
+        cmd.env(format!("ANDROID_SOCKET_{}", socket.name), fd.to_string());
+        // Keep CLOEXEC on the parent copy and expose it only to this child.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        bound.push(path);
+        descriptors.push(descriptor);
+    }
+    let mut child = cmd.spawn().with_context(|| format!("start {}", s.path))?;
+    drop(descriptors);
+    drop(stopped);
     let status = child.wait().context("wait for it")?;
-    Ok(format!("pid {} ended: {status}", child.id()))
+    Ok(Some(format!("pid {} ended: {status}", child.id())))
+}
+
+fn bind_socket(socket: &skyward_config::ServiceSocket, uid: u32, gid: u32) -> Result<(Socket, OwnedFd)> {
+    let name = format!("/dev/socket/{}", socket.name);
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    ensure!(name.len() < addr.sun_path.len(), "socket path is too long: {name}");
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (dst, src) in addr.sun_path.iter_mut().zip(name.bytes()) {
+        *dst = src as _;
+    }
+    match fs::symlink_metadata(&name) {
+        Ok(existing) if existing.file_type().is_socket() => fs::remove_file(&name)?,
+        Ok(_) => bail!("{name} exists and is not a socket"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if raw == -1 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + name.len() + 1;
+    if unsafe { libc::bind(raw, (&raw const addr).cast(), len as libc::socklen_t) } == -1 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let bound = Socket { path: PathBuf::from(name) };
+    chown(&bound.path, Some(uid), Some(gid))?;
+    fs::set_permissions(&bound.path, fs::Permissions::from_mode(socket.mode))?;
+    Ok((bound, fd))
 }
 
 /// The program as it is started: with what it is given, from the top of the
 /// tree, reading and writing nothing of the recovery's, finding its
 /// libraries where it names them, and as `who`.
-fn command(s: &Service, who: &Credentials) -> Command {
+fn command(s: &Service, who: &Credentials) -> Result<Command> {
     let mut cmd = Command::new(&s.path);
     cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.envs(&s.environment);
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
     }
     let who = who.clone();
+    let mounts = s.mounts.iter().map(|m| Ok((CString::new(m.source.as_str())?, CString::new(m.target.as_str())?)))
+        .collect::<Result<Vec<_>>>()?;
+    let mut detach = Vec::new();
+    if s.ramdisk_only {
+        let mut installed = Process::myself()?.mountinfo()?.0;
+        installed.retain(|m| Path::new("/sys/dev/block").join(&m.majmin).exists());
+        // Detach parents first. This also reveals older mounts hidden below
+        // an overmount, and can remove a child before its own turn.
+        installed.sort_by_key(|m| m.mount_point.components().count());
+        for m in installed {
+            ensure!(m.mount_point != Path::new("/"), "the service requires a ramdisk root");
+            detach.push(CString::new(m.mount_point.as_os_str().as_bytes())?);
+        }
+    }
+    let private = s.ramdisk_only || !mounts.is_empty();
     // Only system calls run between the fork and the exec, on what was
     // worked out before it.
-    unsafe { cmd.pre_exec(move || who.take_on()) };
-    cmd
+    unsafe {
+        cmd.pre_exec(move || {
+            if private && (libc::unshare(libc::CLONE_NEWNS) != 0
+                    || libc::mount(std::ptr::null(), c"/".as_ptr(), std::ptr::null(),
+                        libc::MS_REC | libc::MS_PRIVATE, std::ptr::null()) != 0) {
+                return Err(io::Error::last_os_error());
+            }
+            for target in &detach {
+                if libc::umount2(target.as_ptr(), libc::MNT_DETACH) != 0 {
+                    let error = io::Error::last_os_error();
+                    if !matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOENT)) {
+                        return Err(error);
+                    }
+                }
+            }
+            for (source, target) in &mounts {
+                if libc::mount(source.as_ptr(), target.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            who.take_on()
+        })
+    };
+    Ok(cmd)
 }
 
 /// Lock in memory every file the running programs have mapped or open on
@@ -321,6 +492,21 @@ pub fn running(path: &str) -> Option<u32> {
         let pid: u32 = e.file_name().to_str()?.parse().ok()?;
         (fs::read_link(e.path().join("exe")).ok()? == Path::new(path)).then_some(pid)
     })
+}
+
+/// Every process running `path`.
+fn running_all(path: &Path) -> Result<Vec<u32>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir("/proc").context("read /proc")? {
+        let entry = entry.context("read /proc")?;
+        let Some(pid) = entry.file_name().to_str().and_then(|p| p.parse().ok()) else {
+            continue;
+        };
+        if fs::read_link(entry.path().join("exe")).ok().as_deref() == Some(path) {
+            out.push(pid);
+        }
+    }
+    Ok(out)
 }
 
 /// Wait for a process that is not our child to exit.

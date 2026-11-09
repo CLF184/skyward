@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
 use skyward_crypto::data::{self, Closed, Opening};
 use skyward_crypto::keymint::KeyMint;
+use skyward_crypto::weaver;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 
@@ -43,9 +45,9 @@ impl Decryptor {
             .name("decrypt".into())
             .spawn(move || {
                 let ended_as = match job {
-                    Job::Open => Ended::Opened(with_key_service(data::open_without_credential)),
+                    Job::Open => Ended::Opened(open_without_credential()),
                     Job::Unlock { closed, user, credential } => {
-                        Ended::Unlocked(with_key_service(|service| data::unlock(service, &closed, user, &credential)))
+                        Ended::Unlocked(with_key_service(|service| data::unlock(service, &closed, user, &credential, data_weaver_config()?)))
                     }
                 };
                 // The screen only stops listening once it has let the
@@ -67,6 +69,27 @@ impl Decryptor {
         while unsafe { libc::read(self.wake.as_raw_fd(), drain.as_mut_ptr().cast(), drain.len()) } > 0 {}
         self.ended.try_recv().ok()
     }
+}
+
+pub fn weaver_config() -> Result<Option<weaver::Config>> {
+    let path = Path::new("/").join(skyward_config::ramdisk::CONFIG);
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let config = skyward_config::DeviceConfig::load(path)?;
+    Ok((config.device.codename == "piano").then_some(weaver::PIANO_CONFIG))
+}
+
+pub fn open_without_credential() -> Result<Opening, String> {
+    with_key_service(|service| data::open_without_credential(service, data_weaver_config()?))
+}
+
+pub fn data_weaver_config() -> Result<Option<weaver::Config>> {
+    let config = weaver_config()?;
+    if config.is_some() {
+        crate::firmware::prepare_piano()?;
+    }
+    Ok(config)
 }
 
 impl Drop for Decryptor {

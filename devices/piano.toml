@@ -1,0 +1,165 @@
+[device]
+codename = "piano"
+brand = "Xiaomi"
+model = "Xiaomi Pad 8 Pro"
+tablet = true
+supports_vibration = false
+ab = true
+soc = { hans = "骁龙®8至尊版移动平台", hant = "Snapdragon® 8 Elite 行動平台", en = "Snapdragon® 8 Elite Mobile Platform" }
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+width = 3200
+height = 2136
+density = 440
+diagonal = 11.2
+corner_radius = 55
+
+[init]
+writes = [
+    { path = "/sys/class/backlight/panel0-backlight/brightness", value = "2048" },
+    { path = "/sys/module/firmware_class/parameters/path", value = "/piano/firmware/o8" },
+]
+properties = { "vendor.gatekeeper.is_security_level_spu" = "0", "vendor.keymint.retry_timer" = "5" }
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
+load = []
+
+[touch]
+swap_xy = true
+flip_y = true
+ignored_devices = ["NVTCapacitivePenP81c", "NVTCapacitivePenM80p"]
+
+[firmware]
+partition = "modem"
+
+[partitions]
+mounted = ["persist"]
+
+[logd]
+libraries = ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]
+
+# The host touch stack uses the reference ODM files even while stock ODM
+# and vendor are mounted for the rest of recovery.
+[[service]]
+path = "/piano/odm/bin/touch_report"
+ramdisk_only = true
+mounts = [{ source = "/piano/odm", target = "/odm" }]
+libraries = ["/odm/lib64", "/system/lib64"]
+user = "root"
+groups = ["root", "uhid", "input"]
+capabilities = ["SYS_NICE"]
+
+[[owners]]
+user = "system"
+group = "drmrpc"
+mode = 0o770
+paths = ["/dev/socket"]
+
+# QSEE, Mink, SSGTZD and Gatekeeper start before the KeyMint readiness wait.
+[[service]]
+path = "/piano/bin/piano-qseecomd"
+libraries = ["/piano/binder/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+sockets = [{ name = "notify-topology", mode = 0o660, user = "system", group = "drmrpc" }]
+user = "root"
+groups = ["root", "drmrpc"]
+
+[[service]]
+path = "/piano/bin/piano-minkdaemon"
+libraries = ["/piano/binder/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+sockets = [{ name = "hlos_mink_opener", mode = 0o660, user = "system", group = "drmrpc" }]
+user = "system"
+groups = ["system", "drmrpc"]
+
+[[service]]
+path = "/piano/bin/piano-ssgtzd"
+libraries = ["/piano/binder/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+sockets = [
+    { name = "ssgtzd", mode = 0o660, user = "system", group = "oem_2912" },
+    { name = "ssgtzd_opener", mode = 0o660, user = "system", group = "system" },
+]
+user = "system"
+groups = ["system", "oem_2912", "wakelock"]
+capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
+
+[[service]]
+path = "/piano/bin/piano-gatekeeper"
+libraries = ["/piano/binder/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+registers = ["android.hardware.gatekeeper.IGatekeeper/default"]
+description = "/piano/piano-vintf.xml"
+user = "system"
+groups = ["system"]
+
+[[service]]
+path = "/piano/bin/piano-keymint"
+libraries = ["/piano/binder/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+ready_property_value = "true"
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+registers = [
+    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+    "android.hardware.security.secureclock.ISecureClock/default",
+    "android.hardware.security.sharedsecret.ISharedSecret/default",
+]
+user = "system"
+groups = ["system", "drmrpc"]
+
+[[service]]
+path = "/piano/bin/piano-weaver-hos3"
+libraries = ["/piano/binder/lib64", "/odm/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+ready_service = "android.hardware.weaver.IWeaver/default"
+when = { property = "ro.build.version.release", value = "16" }
+user = "system"
+groups = ["system", "drmrpc"]
+
+[[service]]
+path = "/piano/bin/piano-weaver-hos4"
+libraries = ["/piano/binder/lib64", "/odm/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+ready_service = "android.hardware.weaver.IWeaver/default"
+when = { property = "ro.build.version.release", value = "17" }
+user = "system"
+groups = ["system", "drmrpc"]
+capabilities = ["WAKE_ALARM"]
+
+[[service]]
+path = "/piano/bin/piano-qwesd"
+libraries = ["/piano/binder/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64"]
+data_directory = "/data/vendor/qwes"
+user = "system"
+groups = ["system", "inet"]
+
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+# HyperOS 4 China full package, checked against Xiaomi's official update
+# server on 2026-11-10.
+[stock]
+version = "OS4.0.5.0.XPYCNXM"
+package = "https://ultimateota.d.miui.com/OS4.0.5.0.XPYCNXM/piano-ota_full-OS4.0.5.0.XPYCNXM-user-17.0-86f6af9e1b.zip"
+recovery = "56d144b7b41ec2b5832dc5b10927d9545398cfcc30e85684531665db968ca095"
+
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = [
+    "vendor/tzstorage",
+    "vendor/qtee",
+    "vendor/mitee",
+    "vendor/goodix",
+    "vendor/fingerprint",
+    "vendor/fpdata",
+    "vendor/misc/mi_fp",
+]
+
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/bsplog",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ramdump_ssr",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]

@@ -37,6 +37,8 @@ pub struct Config {
     pub value_bytes: usize,
 }
 
+pub const PIANO_CONFIG: Config = Config { slots: 128, key_bytes: 16, value_bytes: 16 };
+
 /// The call that asks the weaver about itself.
 fn ask_config() -> Parcel {
     Parcel::call(INTERFACE)
@@ -66,7 +68,7 @@ fn ask_value(slot: u32, key: &[u8]) -> Parcel {
 
 /// What the weaver answered a read with: the value the slot keeps, or why
 /// it kept it back.
-fn value(read: &mut Reader) -> Result<Vec<u8>> {
+fn value_with_size(read: &mut Reader, size: Option<usize>) -> Result<Vec<u8>> {
     if let Err(e) = status::ok(read) {
         return Err(match status::refused_with(&e) {
             Some(STATUS_INCORRECT_KEY) => e.context("the secure element does not recognise that credential"),
@@ -86,7 +88,12 @@ fn value(read: &mut Reader) -> Result<Vec<u8>> {
     read.go(end)?;
     let seconds = (wait.max(0) as u64).div_ceil(1000);
     match said {
-        READ_OK => Ok(value),
+        READ_OK => {
+            if let Some(size) = size {
+                anyhow::ensure!(wait == 0 && value.len() == size, "invalid successful Weaver reply");
+            }
+            Ok(value)
+        }
         READ_THROTTLE => bail!("the secure element is holding off further tries for another {seconds} seconds"),
         READ_INCORRECT_KEY if wait > 0 => {
             bail!("the secure element does not recognise that credential, and holds off further tries for another {seconds} seconds")
@@ -100,6 +107,7 @@ fn value(read: &mut Reader) -> Result<Vec<u8>> {
 #[cfg(target_os = "android")]
 pub struct Weaver<'a> {
     device: skyward_binder::driver::Handle<'a>,
+    fixed: Option<Config>,
 }
 
 #[cfg(target_os = "android")]
@@ -108,10 +116,18 @@ impl<'a> Weaver<'a> {
     pub fn open(binder: &'a skyward_binder::driver::Binder) -> Result<Weaver<'a>> {
         let device = skyward_binder::service::find(binder, SERVICE)?
             .with_context(|| format!("{SERVICE} is not running; the phone's weaver has to be started first"))?;
-        Ok(Weaver { device })
+        Ok(Weaver { device, fixed: None })
+    }
+
+    pub fn with_config(mut self, fixed: Option<Config>) -> Self {
+        self.fixed = fixed;
+        self
     }
 
     pub fn config(&self) -> Result<Config> {
+        if let Some(config) = self.fixed {
+            return Ok(config);
+        }
         let reply = self.device.transact(GET_CONFIG, &ask_config()).context("ask the weaver about itself")?;
         config(&mut reply.read())
     }
@@ -120,14 +136,33 @@ impl<'a> Weaver<'a> {
     /// the slot by the secure element, so this is not something to call
     /// twice over on a guess.
     pub fn read(&self, slot: u32, key: &[u8]) -> Result<Vec<u8>> {
+        if let Some(config) = self.fixed {
+            anyhow::ensure!(slot < config.slots && key.len() == config.key_bytes, "invalid Weaver slot or key length");
+        }
         let reply = self.device.transact(READ, &ask_value(slot, key)).with_context(|| format!("read slot {slot} of the weaver"))?;
-        value(&mut reply.read())
+        value_with_size(&mut reply.read(), self.fixed.map(|config| config.value_bytes))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn value(read: &mut Reader) -> Result<Vec<u8>> {
+        value_with_size(read, None)
+    }
+
+    #[test]
+    fn piano_checks_the_value_size_and_timeout_of_a_successful_read() {
+        for (timeout, length, accepted) in [(0, 16, true), (1, 16, false), (0, 15, false)] {
+            let reply = answered(|p| {
+                p.i64(timeout);
+                p.blob(&vec![7; length]);
+                p.i32(READ_OK);
+            });
+            assert_eq!(value_with_size(&mut Reader::new(&reply), Some(PIANO_CONFIG.value_bytes)).is_ok(), accepted);
+        }
+    }
 
     /// A reply that went through, carrying one structure: that it is there,
     /// how long it is, then its fields.

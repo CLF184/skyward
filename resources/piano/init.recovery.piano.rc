@@ -1,0 +1,32 @@
+service piano_touch /system/bin/sh /piano/bin/piano-load-touch.sh
+    class core
+    user root
+    group root system input
+    seclabel u:r:recovery:s0
+    oneshot
+    disabled
+
+on post-fs
+    mkdir /mnt/vendor/persist 0771 root system
+    wait /dev/block/by-name/persist 5
+    mount ext4 /dev/block/by-name/persist /mnt/vendor/persist ro noatime nosuid nodev
+    start vendor.boot-qti
+
+service vendor.piano_boot_adsp /system/bin/sh /piano/bin/piano-boot-adsp.sh
+    class core
+    user root
+    group root system
+    seclabel u:r:recovery:s0
+    oneshot
+    disabled
+
+service vendor.piano_batterysecret /vendor/bin/batterysecret
+    class core
+    user root
+    group system wakelock
+    seclabel u:r:recovery:s0
+    setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/odm/lib64:/system/lib64
+    disabled
+
+on property:init.svc.vendor.piano_boot_adsp=stopped
+    start vendor.piano_batterysecret

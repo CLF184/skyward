@@ -6,17 +6,23 @@ use skyward_vab::SnapshotState;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "android")]
+mod advanced;
+#[cfg(target_os = "android")]
 mod backup;
 #[cfg(target_os = "android")]
 mod decrypt;
 #[cfg(target_os = "android")]
 mod filework;
 #[cfg(target_os = "android")]
+mod firmware;
+#[cfg(target_os = "android")]
 mod haptics;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
 mod merge;
+#[cfg(any(target_os = "android", test))]
+mod orientation;
 #[cfg(target_os = "android")]
 mod partwork;
 #[cfg(target_os = "android")]
@@ -74,6 +80,13 @@ enum Cmd {
     },
     /// Run as the recovery service (what init starts as /system/bin/recovery).
     Recovery,
+    /// Make firmware available and start the configured kernel processor
+    /// before init starts the recovery's hardware services.
+    #[cfg(target_os = "android")]
+    Firmware {
+        #[arg(long, default_value = "/skyward/device.toml")]
+        config: String,
+    },
     /// Reboot through init: system, recovery, fastboot, bootloader, edl, or
     /// off.
     Reboot { target: String },
@@ -236,6 +249,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Recovery => recovery(),
+        #[cfg(target_os = "android")]
+        Cmd::Firmware { config } => {
+            let cfg = DeviceConfig::load(config)?;
+            firmware::start(cfg.firmware.as_ref().context("the configuration names no firmware partition")?)
+        },
         Cmd::Reboot { target } => {
             let p = Power::parse(&target).ok_or_else(|| anyhow!("unknown target {target:?}"))?;
             skyward_sys::power(p)
@@ -276,7 +294,11 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Services { config } => {
             let props = skyward_info::installed_props(booted_slot()?)?;
-            let mut services = DeviceConfig::load(&config)?.services;
+            let cfg = DeviceConfig::load(&config)?;
+            if let Some(orientation) = &cfg.orientation {
+                orientation::prepare(orientation)?;
+            }
+            let mut services = cfg.services;
             services.retain(|s| s.runs_on(&props));
             services::start(&services, secure::libraries()?.as_deref())?;
             loop {
@@ -372,7 +394,7 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Weaver => {
             let binder = skyward_binder::driver::Binder::open()?;
-            let c = skyward_crypto::weaver::Weaver::open(&binder)?.config()?;
+            let c = skyward_crypto::weaver::Weaver::open(&binder)?.with_config(decrypt::weaver_config()?).config()?;
             println!("the weaver has {} slots, keeps keys of {} bytes and values of {} bytes", c.slots, c.key_bytes, c.value_bytes);
             Ok(())
         }
@@ -387,7 +409,8 @@ fn main() -> Result<()> {
             use skyward_crypto::data;
             let binder = skyward_binder::driver::Binder::open()?;
             let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
-            let opening = data::open_without_credential(&service)?;
+            let weaver = decrypt::data_weaver_config()?;
+            let opening = data::open_without_credential(&service, weaver)?;
             match &opening.mounted {
                 Some(mounted) => {
                     if let Some(checked) = &mounted.checked {
@@ -401,7 +424,7 @@ fn main() -> Result<()> {
             let mut closed = opening.closed;
             let asked = closed.iter().find(|c| !c.made_up).map(|c| c.user);
             if let (Some(credential), Some(user)) = (&credential, asked) {
-                closed = data::unlock(&service, &closed, user, credential.as_bytes())?;
+                closed = data::unlock(&service, &closed, user, credential.as_bytes(), weaver)?;
             }
             for c in &closed {
                 match &c.why {
@@ -510,6 +533,12 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let at = skyward_block::fstab::mount(name)?;
         skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
     }
+    if cfg.device.codename == "piano" {
+        firmware::prepare_piano()?;
+        if let Err(e) = skyward_sys::set_prop("ctl.start", "vendor.piano_boot_adsp") {
+            skyward_sys::kmsg(&format!("piano ADSP startup was not requested: {e:#}"))?;
+        }
+    }
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
@@ -537,6 +566,11 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     let libraries = secure::libraries()?;
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
+    }
+    if let Some(orientation) = &cfg.orientation {
+        if let Err(e) = orientation::prepare(orientation) {
+            skyward_sys::kmsg(&format!("orientation services not prepared: {e:#}"))?;
+        }
     }
     services::start(&services, libraries.as_deref())?;
     agree_on_the_notes_key(&registering)
@@ -683,6 +717,11 @@ fn recovery() -> Result<()> {
         std::fs::set_permissions(skyward_sys::RUN, std::fs::Permissions::from_mode(0o755))
             .with_context(|| format!("open {} to the recovery's other users", skyward_sys::RUN))?;
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
+        let panic_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = skyward_sys::kmsg(&format!("recovery panic: {info}"));
+            panic_hook(info);
+        }));
         // A recovery that ended with a function of its own in the port took
         // the port with it; going through "none" takes that function off.
         if skyward_sys::prop("sys.usb.state").is_some_and(|s| s != "adb") {
