@@ -15,6 +15,9 @@ density = 440
 diagonal = 11.2
 corner_radius = 55
 
+[init]
+properties = { "vendor.gatekeeper.is_security_level_spu" = "0", "vendor.keymint.retry_timer" = "5" }
+
 [modules]
 sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
 load = ["nt36532_touch"]
@@ -23,6 +26,15 @@ load = ["nt36532_touch"]
 swap_xy = true
 flip_y = true
 ignored_devices = ["NVTCapacitivePenP81c", "NVTCapacitivePenM80p"]
+
+[firmware]
+partition = "modem"
+
+[partitions]
+mounted = ["persist"]
+
+[logd]
+libraries = ["/mnt/system/system/lib64/libsysutils.so", "/mnt/system/system/lib64/libcap.so"]
 
 [disk]
 device = "/dev/block/sda"
@@ -57,6 +69,60 @@ libraries = ["/odm/lib64", "/vendor/lib64", "/system/lib64"]
 user = "root"
 groups = ["root", "input", "system"]
 capabilities = ["SYS_NICE"]
+
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+sockets = [{ name = "notify-topology", kind = "stream", mode = 0o660, user = "system", group = "drmrpc" }]
+
+[[service]]
+path = "/vendor/bin/hlosminkdaemon"
+libraries = ["/system/lib64", "/vendor/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+user = "system"
+groups = ["system"]
+sockets = [{ name = "hlos_mink_opener", kind = "stream", mode = 0o660, user = "system", group = "system" }]
+
+[[service]]
+path = "/vendor/bin/ssgtzd"
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+user = "system"
+groups = ["system", "oem_2912", "wakelock"]
+capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
+sockets = [
+    { name = "ssgtzd", kind = "stream", mode = 0o660, user = "system", group = "oem_2912" },
+    { name = "ssgtzd_opener", kind = "stream", mode = 0o660, user = "system", group = "system" },
+]
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+registers = [
+    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+    "android.hardware.security.secureclock.ISecureClock/default",
+    "android.hardware.security.sharedsecret.ISharedSecret/default",
+]
+user = "system"
+groups = ["system", "drmrpc"]
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
+description = "/vendor/etc/vintf/manifest_sun.xml"
+user = "system"
+groups = ["system"]
+
+[[service]]
+path = "/odm/bin/hw/android.hardware.weaver"
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64", "/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_service = "android.hardware.weaver.IWeaver/default"
+description = "/odm/etc/vintf/manifest/android.hardware.weaver.xml"
+user = "system"
+groups = ["system", "drmrpc"]
 
 [wlan]
 modules = ["rfkill", "qca_cld3_peach_v2"]

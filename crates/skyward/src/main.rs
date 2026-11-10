@@ -300,6 +300,9 @@ fn main() -> Result<()> {
             }
             let mut services = cfg.services;
             services.retain(|s| s.runs_on(&props));
+            if let Err(e) = secure::provide_system_libraries() {
+                skyward_sys::kmsg(&format!("the installed system's libraries are not in place: {e:#}"))?;
+            }
             services::start(&services, secure::libraries()?.as_deref())?;
             loop {
                 std::thread::park();
@@ -559,6 +562,11 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     let libraries = secure::libraries()?;
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
+    }
+    match secure::provide_system_libraries() {
+        Ok(0) => {}
+        Ok(copied) => skyward_sys::kmsg(&format!("{copied} libraries of the installed system are in place for its services"))?,
+        Err(e) => skyward_sys::kmsg(&format!("the installed system's libraries are not in place: {e:#}"))?,
     }
     if let Some(orientation) = &cfg.orientation {
         if let Err(e) = orientation::prepare(orientation) {

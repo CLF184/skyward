@@ -533,6 +533,18 @@ pub struct Service {
     /// names it: it keeps these alone, through its change of user.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Unix stream listeners provided through ANDROID_SOCKET_<name>.
+    #[serde(default)]
+    pub sockets: Vec<InitSocket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct InitSocket {
+    pub name: String,
+    pub kind: String,
+    pub mode: u32,
+    pub user: String,
+    pub group: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -700,6 +712,7 @@ impl DeviceConfig {
                 s.path
             );
         }
+        let mut socket_names = std::collections::HashSet::new();
         for s in &cfg.services {
             for mount in &s.mounts {
                 for path in [&mount.source, &mount.target] {
@@ -712,6 +725,17 @@ impl DeviceConfig {
             }
             for name in &s.capabilities {
                 ensure!(capability(name).is_some(), "[[service]] {}: {name} is not a capability init knows", s.path);
+            }
+            for socket in &s.sockets {
+                ensure!(!socket.name.is_empty() && socket.name.len() < 95
+                    && socket.name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+                    "[[service]] {}: invalid socket name", s.path);
+                ensure!(socket_names.insert(socket.name.clone()), "duplicate service socket {}", socket.name);
+                ensure!(socket.kind == "stream", "[[service]] {}: only stream sockets are supported", s.path);
+                ensure!(socket.mode <= 0o777, "invalid service socket permissions");
+                for name in [&socket.user, &socket.group] {
+                    ensure!(!name.is_empty() && !name.contains(char::is_whitespace), "invalid service socket account");
+                }
             }
         }
         for folder in &cfg.backup.data_skipped {
@@ -1123,19 +1147,37 @@ mod tests {
     }
 
     #[test]
-    fn piano_follows_the_shared_soc_configuration() {
+    fn piano_uses_the_stock_sun_decryption_services() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/piano.toml")).unwrap();
         assert_eq!(cfg.modules.load, ["nt36532_touch"]);
-        assert_eq!(cfg.firmware, None);
-        assert!(cfg.partitions.mounted.is_empty());
-        assert!(cfg.logd.is_none());
+        assert_eq!(cfg.firmware.expect("firmware").partition, "modem");
+        assert_eq!(cfg.partitions.mounted, ["persist"]);
+        assert_eq!(cfg.logd.expect("logd libraries").libraries.len(), 2);
         assert!(cfg.backup.efs.is_empty());
         assert!(cfg.wipe.logs.is_empty());
-        assert_eq!(cfg.services.len(), 2);
-        let touch = cfg.services.iter().find(|s| s.path == "/odm/bin/touch_report_debug").expect("stock touch reporting");
-        assert_eq!(touch.groups, ["root", "input", "system"]);
-        let post_boot = cfg.services.iter().find(|s| s.path == "/vendor/bin/sh").expect("stock post-boot service");
-        assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
+        let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/vendor/bin/sh",
+                "/odm/bin/touch_report_debug",
+                "/vendor/bin/qseecomd",
+                "/vendor/bin/hlosminkdaemon",
+                "/vendor/bin/ssgtzd",
+                "/vendor/bin/hw/android.hardware.security.keymint-service-qti",
+                "/vendor/bin/hw/android.hardware.gatekeeper-service-qti",
+                "/odm/bin/hw/android.hardware.weaver",
+            ]
+        );
+        let qsee = &cfg.services[2];
+        assert_eq!(qsee.sockets[0].name, "notify-topology");
+        assert_eq!(qsee.ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
+        let keymint = &cfg.services[5];
+        assert_eq!(keymint.ready_service.as_deref(), Some("android.hardware.security.keymint.IKeyMintDevice/default"));
+        let gatekeeper = &cfg.services[6];
+        assert_eq!(gatekeeper.description.as_deref(), Some("/vendor/etc/vintf/manifest_sun.xml"));
+        let weaver = &cfg.services[7];
+        assert_eq!(weaver.ready_service.as_deref(), Some("android.hardware.weaver.IWeaver/default"));
         let wlan = cfg.wlan.expect("WLAN");
         assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
         assert_eq!(wlan.firmware.len(), 2);
@@ -1143,6 +1185,19 @@ mod tests {
         assert_eq!(disk.device, "/dev/block/sda");
         assert_eq!(disk.gpt.disks, ["sda", "sdb", "sdc", "sdd", "sde", "sdf"]);
         assert!(cfg.services.iter().all(|s| !s.path.starts_with("/piano")), "{:?}", cfg.services.iter().map(|s| &s.path).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn service_sockets_validate_names_ownership_and_uniqueness() {
+        let header = "[device]\ncodename = \"x\"\n[[service]]\npath = \"/vendor/bin/daemon\"\n";
+        let socket = "{ name = \"hlos_mink_opener\", kind = \"stream\", mode = 0o660, user = \"system\", group = \"system\" }";
+        let cfg = DeviceConfig::parse(&format!("{header}sockets = [{socket}]\n")).unwrap();
+        assert_eq!(cfg.services[0].sockets[0].mode, 0o660);
+        assert!(DeviceConfig::parse(&format!("{header}sockets = [{socket}, {socket}]\n")).is_err());
+        for name in ["../x", ".", "", "a/b", "a b"] {
+            assert!(DeviceConfig::parse(&format!("{header}sockets = [{}]\n", socket.replace("hlos_mink_opener", name))).is_err());
+        }
+        assert!(DeviceConfig::parse(&format!("{header}sockets = [{}]\n", socket.replace("stream", "dgram"))).is_err());
     }
 
     #[test]

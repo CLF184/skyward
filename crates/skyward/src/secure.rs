@@ -30,6 +30,10 @@ const VENDOR_INTERFACE: &str = "ro.vndk.version";
 const DESCRIPTIONS: [&str; 2] = ["/vendor/etc/vintf/manifest", "/odm/etc/vintf/manifest"];
 const RECOVERY_DESCRIPTIONS: &str = "/system/etc/vintf/manifest";
 
+/// Where the phone keeps descriptions that are not split into the folder
+/// above: one file per build of the platform's hardware stack.
+const PLATFORM_DESCRIPTIONS: [&str; 2] = ["/vendor/etc/vintf", "/odm/etc/vintf"];
+
 /// The name init knows the service directory by, and the program it runs.
 const DIRECTORY_SERVICE: &str = "servicemanager";
 const DIRECTORY_PROGRAM: &str = "/system/bin/servicemanager";
@@ -154,6 +158,33 @@ fn describe_hardware(wanted: &[String]) -> Result<String> {
     Ok(out)
 }
 
+/// Libraries the phone's hardware services need from the installed system,
+/// which a recovery's own /system/lib64 leaves out.
+const SYSTEM_LIBRARIES: [&str; 2] = ["libvndksupport.so", "libdl_android.so"];
+
+const RECOVERY_LIBRARY_DIR: &str = "/system/lib64";
+
+/// Copy the installed system's bionic bridges into the recovery's library
+/// folder so its own HALs can load.
+pub fn provide_system_libraries() -> Result<usize> {
+    let into = Path::new(RECOVERY_LIBRARY_DIR);
+    let dirs = [Path::new("/mnt/system/system/lib64"), Path::new("/mnt/system/system/lib64/bootstrap")];
+    let mut copied = 0;
+    for name in SYSTEM_LIBRARIES {
+        let to = into.join(name);
+        if to.exists() {
+            continue;
+        }
+        let Some(from) = dirs.iter().map(|d| d.join(name)).find(|p| p.is_file()) else { continue };
+        let mut part = to.clone().into_os_string();
+        part.push(".part");
+        fs::copy(&from, &part).with_context(|| format!("copy {} to {}", from.display(), Path::new(&part).display()))?;
+        fs::rename(&part, &to).with_context(|| format!("put {} in place", to.display()))?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
 /// Open the bundle of libraries the phone's own partitions were built
 /// against and give the directory they are in. A phone whose partitions
 /// need no bundle has none to open.
@@ -236,9 +267,24 @@ pub fn publish_descriptions(wanted: &[String], files: &[String]) -> Result<usize
             }
         }
     }
+    if let Some(platform) = skyward_sys::prop("ro.board.platform") {
+        for dir in PLATFORM_DESCRIPTIONS {
+            let from = Path::new(dir).join(format!("manifest_{platform}.xml"));
+            let Ok(text) = fs::read_to_string(&from) else { continue };
+            if wanted.iter().any(|w| describes(&text, w)) {
+                take(&from, &text)?;
+            }
+        }
+    }
     for file in files {
         let from = Path::new(file);
-        take(from, &fs::read_to_string(from).with_context(|| format!("read {file}"))?)?;
+        match fs::read_to_string(from) {
+            Ok(text) => take(from, &text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("no description at {file}; the service it belongs to goes without")
+            }
+            Err(e) => return Err(e).with_context(|| format!("read {file}")),
+        }
     }
     let rewritten = say_framework(into)?;
     if copied > 0 || rewritten > 0 {
@@ -309,7 +355,26 @@ fn register_again(registered: &[(String, String)]) -> Result<()> {
 /// the two readers drops the whole set over one description that says it
 /// is the phone's.
 fn as_framework(text: &str) -> String {
-    text.replace("type=\"device\"", "type=\"framework\"").replace("type='device'", "type='framework'")
+    let text = text.replace("type=\"device\"", "type=\"framework\"").replace("type='device'", "type='framework'");
+    oldest_version(&text)
+}
+
+const OLDEST_VERSION: &str = "1.0";
+
+fn oldest_version(text: &str) -> String {
+    const SAID: &str = "version=";
+    let Some(start) = text.find("<manifest") else { return text.to_string() };
+    let Some(element) = text[start..].split_once('>').map(|(element, _)| element) else { return text.to_string() };
+    let Some(at) = element.find(SAID) else { return text.to_string() };
+    let rest = &element[at + SAID.len()..];
+    let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { return text.to_string() };
+    let Some(end) = rest[1..].find(quote).map(|e| e + 1) else { return text.to_string() };
+    if rest[1..end] == *OLDEST_VERSION {
+        return text.to_string();
+    }
+    let from = start + at;
+    let to = start + at + SAID.len() + end + 1;
+    format!("{}version={quote}{OLDEST_VERSION}{quote}{}", &text[..from], &text[to..])
 }
 
 /// Say the same of the descriptions already there, which a recovery ships
@@ -356,5 +421,23 @@ fn answering_again(was: Option<u32>) -> Result<()> {
             anyhow::bail!("the service directory did not come back");
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::as_framework;
+
+    #[test]
+    fn a_phone_description_becomes_the_oldest_framework_description() {
+        assert_eq!(as_framework("<manifest version=\"8.0\" type=\"device\">\n"), "<manifest version=\"1.0\" type=\"framework\">\n");
+        assert_eq!(as_framework("<manifest version='9.0' type='device'>"), "<manifest version='1.0' type='framework'>");
+    }
+
+    #[test]
+    fn only_the_manifest_version_is_lowered() {
+        let said = "<!-- version=\"9.0\" -->\n<manifest version=\"7.0\" type=\"framework\">\n    <hal version=\"4.0\"/>\n</manifest>\n";
+        let want = "<!-- version=\"9.0\" -->\n<manifest version=\"1.0\" type=\"framework\">\n    <hal version=\"4.0\"/>\n</manifest>\n";
+        assert_eq!(as_framework(said), want);
     }
 }

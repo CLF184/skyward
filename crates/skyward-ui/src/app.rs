@@ -6518,7 +6518,12 @@ impl App {
                 crate::tablet::Input::Select(_) => { self.wake(now); Vec::new() }
                 crate::tablet::Input::Sidebar => { self.stir(now); self.dirty = true; Vec::new() }
             };
-            self.tablet = Some(tablet);
+            // Disk maintenance removes the sidebar and becomes a full-width,
+            // keys-only page. Restoring the tablet that routed this gesture
+            // would make the next left-side touch a sidebar selection.
+            if self.tablet_mode {
+                self.tablet = Some(tablet);
+            }
             return effects;
         }
         self.touch_detail(ev, f, now)
@@ -8095,6 +8100,39 @@ mod tests {
         assert_eq!(app.top().1, 300.0);
         tap_back(&mut app, &f, &i, 0);
         assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn entering_disk_maintenance_from_a_tablet_drops_the_sidebar() {
+        let cfg = skyward_config::DeviceConfig::parse(include_str!("../../../devices/piano.toml")).unwrap();
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, 3048, 2032, 2.5);
+        app.configure_device(&cfg);
+        app.state.advanced_tools = true;
+        app.open(Screen::Advanced);
+        app.open(Screen::DiskMaintenance);
+        app.refresh();
+        let track = app.frame(&f, &i).hits.iter()
+            .find(|h| h.action == Action::Confirm(Confirm::DiskMaintenance))
+            .expect("the maintenance warning has its swipe")
+            .rect;
+        let sidebar = app.full_width - app.tablet.as_ref().unwrap().detail.w;
+        let y = track.centre().1 - app.top().1;
+        app.touch(Touch::Down(sidebar as f32 + track.x + track.h / 2.0, y), &f, 0);
+        app.touch(Touch::Move(sidebar as f32 + track.x + track.w / 2.0, y), &f, 0);
+        app.touch(Touch::Move(sidebar as f32 + track.x + track.w, y), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        assert_eq!(app.screen(), Screen::DiskMaintenance);
+        assert!(app.state.disk_maintenance.entered);
+        assert!(!app.tablet_mode);
+        assert!(app.tablet.is_none(), "the old sidebar cannot route later touches");
+        let row = app.frame(&f, &i).hits.iter()
+            .find(|h| h.action == Action::EnableMassStorage)
+            .expect("the keys-only page still draws its tools")
+            .rect;
+        assert!(app.touch(Touch::Down(row.centre().0, row.centre().1), &f, 10).is_empty());
+        assert!(app.touch(Touch::Up, &f, 20).is_empty());
+        assert_eq!(app.screen(), Screen::DiskMaintenance);
     }
 
     /// `screen` opened from the home page, so there is a page to go back
