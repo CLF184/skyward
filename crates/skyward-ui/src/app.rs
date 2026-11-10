@@ -2479,21 +2479,6 @@ struct Charging {
     dark_after: bool,
 }
 
-/// A switch on its way from where it was drawn to where it is going.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Turning {
-    switch: Switch,
-    since: u64,
-    /// How far on it was drawn when it was touched.
-    from: f32,
-}
-
-/// How long a switch takes to turn, and how it eases: quick enough that a
-/// touch feels answered, slow enough to be seen.
-fn switch_turn() -> Ease {
-    Ease::Out(160, 2)
-}
-
 /// A part of the screen fading in or out: where it is headed, since when,
 /// how far in it was then, and how it eases each way.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2826,10 +2811,6 @@ pub struct App {
     /// what a page reads to draw it on its way rather than already
     /// there. One is enough, because a switch is turned by one touch at
     /// a time and a page shows the page it was last touched on.
-    /// The last time anything told the app what time it is. A page drawn
-    /// between two of those reads it to place a switch mid-turn.
-    now: u64,
-    turning: Option<Turning>,
     /// The panel at full brightness, or easing to the dim level it takes
     /// shortly before going off.
     bright: Fade,
@@ -2926,8 +2907,6 @@ impl App {
             active: None,
             woke_at: None,
             tapped: None,
-            now: 0,
-            turning: None,
             bright: full_brightness(),
             curtain: Fade::shown(BRIGHTEN, DARKEN),
             darkening: None,
@@ -3003,7 +2982,6 @@ impl App {
                 || self.morph.is_some()
                 || self.turn.is_some()
                 || self.row_press.is_some_and(|p| p.changing(now) || p.gone(now))
-                || self.switch_moving(now)
                 || self.glowing());
         // The content going dark or coming up, and the charging screen's
         // tide, move a frame at a time while the panel is lit.
@@ -3064,11 +3042,6 @@ impl App {
     /// the bar and its title follow the scroll, and a message past its
     /// deadline goes away.
     pub fn tick(&mut self, now: u64) -> Vec<Effect> {
-        self.now = now;
-        // A switch still turning needs another frame to be drawn in.
-        if self.switch_moving(now) {
-            self.dirty = true;
-        }
         let mut fx = Vec::new();
         // The key waiting for its partner in a screenshot, left alone long
         // enough, does what it does alone.
@@ -3439,50 +3412,6 @@ impl App {
     pub fn remembered(&mut self, code: Option<String>) {
         self.state.remembered = code;
         self.refresh();
-    }
-
-    /// How far on `switch` is to be drawn at `now`: 1 or 0 where it is
-    /// standing still, and the way there while it turns. A page draws
-    /// every switch through this rather than from the setting, so that
-    /// the one just touched is the one that moves.
-    pub fn switch_shown(&self, switch: Switch, now: u64) -> f32 {
-        let standing = if self.switch_on(switch) { 1.0 } else { 0.0 };
-        let Some(turning) = self.turning.filter(|t| t.switch == switch) else { return standing };
-        let run = now.saturating_sub(turning.since);
-        if switch_turn().progress(run) >= 1.0 {
-            return standing;
-        }
-        turning.from + (standing - turning.from) * switch_turn().progress(run)
-    }
-
-    /// Whether a switch that is still turning has stops to draw.
-    pub fn switch_moving(&self, now: u64) -> bool {
-        self.turning.is_some_and(|t| switch_turn().progress(now.saturating_sub(t.since)) < 1.0)
-    }
-
-    /// Where a switch stands, as the settings have it.
-    fn switch_on(&self, switch: Switch) -> bool {
-        match switch {
-            Switch::Vibrate => self.state.vibrate,
-            Switch::FileTransfer => self.state.file_transfer,
-            Switch::Compress => self.state.compress,
-            Switch::Verify => self.state.verify,
-            Switch::Signature => self.state.check_signature,
-            Switch::KeepRecovery => self.state.keep_recovery,
-            Switch::DisableAvb => self.state.disable_avb,
-            Switch::RememberPassword => self.state.remember_password,
-            Switch::ShowPassword => self.state.show_password,
-            Switch::AlwaysOn => self.state.always_on,
-            Switch::DoubleTap => self.state.double_tap,
-            Switch::Wlan => self.state.wlan.as_ref().is_some_and(|w| matches!(w.power, Power::On)),
-        }
-    }
-
-    /// Where the switch `switch` is drawn right now, 0 or 1 where it stands
-    /// still and somewhere between while it turns: what a touch turns it away
-    /// from, so that a switch caught mid-turn carries on from there.
-    fn switch_level(&self, switch: Switch) -> f32 {
-        self.switch_shown(switch, self.now)
     }
 
     /// What the AVB page's read found, and what the write before it said.
@@ -4386,10 +4315,6 @@ impl App {
                     state: &self.state,
                     term: self.term.as_ref(),
                     band: Some(band),
-                    // A switch on its way is drawn from where it was to
-                    // where it is going, which is the only thing a page
-                    // asks the app for here.
-                    switch: Some(&|switch| self.switch_shown(switch, self.now)),
                 };
                 let fresh = pages::render(screen, &cx);
                 let mut canvas = self.frame.take().expect("checked above").canvas;
@@ -4410,10 +4335,6 @@ impl App {
                     state: &self.state,
                     term: self.term.as_ref(),
                     band: Some(band),
-                    // A switch on its way is drawn from where it was to
-                    // where it is going, which is the only thing a page
-                    // asks the app for here.
-                    switch: Some(&|switch| self.switch_shown(switch, self.now)),
                 };
             let mut frame = pages::render(screen, &cx);
             // A page drawn in part across holds its rows whole, the columns
@@ -4482,10 +4403,6 @@ impl App {
                     state: &self.state,
                     term: self.term.as_ref(),
                     band: Some(band),
-                    // A switch on its way is drawn from where it was to
-                    // where it is going, which is the only thing a page
-                    // asks the app for here.
-                    switch: Some(&|switch| self.switch_shown(switch, self.now)),
                 };
         let part = pages::render(self.screen(), &cx).canvas;
         self.frame.as_mut().expect("drawn above").canvas.replace(&part);
@@ -4524,10 +4441,6 @@ impl App {
                     state: &self.state,
                     term: self.term.as_ref(),
                     band: Some(band),
-                    // A switch on its way is drawn from where it was to
-                    // where it is going, which is the only thing a page
-                    // asks the app for here.
-                    switch: Some(&|switch| self.switch_shown(switch, self.now)),
                 };
             let part = pages::render(screen, &cx).canvas;
             self.frame.as_mut().expect("drawn above").canvas.join(&part);
@@ -4654,7 +4567,7 @@ impl App {
             let (x, y, w, h) = row_part(press.rect, page);
             let pressed = t.pressed();
             let band = Band { rows: (y, y + h), cols: (x, x + w) };
-            let cx = Ctx { switch: None, t: &pressed, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
+            let cx = Ctx { t: &pressed, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
             let down = pages::render(screen, &cx).canvas;
             assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
             self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
@@ -4796,7 +4709,7 @@ impl App {
                             let (f, info) = fresh.expect("a page drawn again as it last showed has its rows in view drawn");
                             let mut c = self.spare.pop().unwrap_or_else(|| Canvas::new(out.w, 0));
                             c.resize((rows.edges[i + 1] - rows.edges[i]) as u32);
-                            let cx = Ctx { switch: None, t, f, info, state: &self.state, term: self.term.as_ref(), band: None };
+                            let cx = Ctx { t, f, info, state: &self.state, term: self.term.as_ref(), band: None };
                             pages::row(screen, &cx, i, &mut c);
                             self.drawn.push((i, c));
                             self.drawn.len() - 1
@@ -5476,7 +5389,6 @@ impl App {
 
     /// Carry out a tapped control.
     fn act(&mut self, action: Action, now: u64) -> Vec<Effect> {
-        self.now = now;
         let l = self.state.lang;
         match action {
             Action::Open(s) => {
@@ -5530,7 +5442,6 @@ impl App {
                 return vec![Effect::Wlan(on)];
             }
             Action::Toggle(switch) => {
-                let was = self.switch_level(switch);
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
                     Switch::FileTransfer => &mut self.state.file_transfer,
@@ -5547,10 +5458,6 @@ impl App {
                 };
                 *on = !*on;
                 let now_on = *on;
-                // From where it was drawn to where it goes: a switch touched
-                // again before it has finished turning carries on from
-                // wherever it had reached rather than jumping back.
-                self.turning = Some(Turning { switch, since: now, from: was });
                 if switch == Switch::RememberPassword && !now_on {
                     self.state.remembered = None;
                 }
@@ -7531,7 +7438,7 @@ mod tests {
         ];
         for t in [Theme::light(W, H, PPD), Theme::dark(W, H, PPD).pressed()] {
             for screen in screens {
-                let cx = |band| Ctx { switch: None, t: &t, f: &f, info: &i, state: &state, term: None, band };
+                let cx = |band| Ctx { t: &t, f: &f, info: &i, state: &state, term: None, band };
                 let whole = pages::render(screen, &cx(None)).canvas;
                 let row = whole.w as usize * 4;
                 let differs = |c: &Canvas| c.data.chunks(row).zip(whole.data.chunks(row)).position(|(a, b)| a != b);
@@ -7576,7 +7483,7 @@ mod tests {
             bands += 1;
         }
         let t = app.theme();
-        let whole = pages::render(Screen::Settings, &Ctx { switch: None, t: &t, f: &f, info: &i, state: &app.state, term: None, band: None }).canvas;
+        let whole = pages::render(Screen::Settings, &Ctx { t: &t, f: &f, info: &i, state: &app.state, term: None, band: None }).canvas;
         let page = &app.frame.as_ref().unwrap().canvas;
         assert!(whole.h > H + H / 4, "a page well over a screen long, drawn in {bands} more bands");
         assert!(page.whole() && page.data == whole.data, "the page drawn a band at a time is the page drawn whole");
@@ -7590,7 +7497,7 @@ mod tests {
         app.compose(&mut out, &f, &i, "12:00", 0);
         let anew = |app: &App| {
             let t = app.theme();
-            pages::render(Screen::Search, &Ctx { switch: None, t: &t, f: &f, info: &i, state: &app.state, term: None, band: None })
+            pages::render(Screen::Search, &Ctx { t: &t, f: &f, info: &i, state: &app.state, term: None, band: None })
         };
         for cap in [Cap::Char('b'), Cap::Char('f'), Cap::Space, Cap::Backspace, Cap::Shift, Cap::Char('q')] {
             let (x, y) = spot(&mut app, &f, &i, Action::Type(cap));
@@ -8588,72 +8495,6 @@ mod tests {
         assert!(app.state.remembered.is_none(), "the credential goes with the switch");
         assert!(!app.state.remember_password);
     }
-    #[test]
-    fn a_switch_slid_from_where_it_was_to_where_it_goes() {
-        let mut app = App::new(Screen::Settings, W, H, PPD);
-        // Standing still it is simply where the setting is.
-        assert_eq!(app.switch_shown(Switch::Vibrate, 0), 1.0, "vibration starts on");
-        assert_eq!(app.switch_shown(Switch::AlwaysOn, 0), 0.0, "the face starts off");
-        // Touched, it does not arrive at once: it is drawn on its way.
-        app.act(Action::Toggle(Switch::Vibrate), 1_000);
-        assert_eq!(app.switch_shown(Switch::Vibrate, 1_000), 1.0, "it starts from where it was");
-        let part = app.switch_shown(Switch::Vibrate, 1_080);
-        assert!(part < 1.0 && part > 0.0, "half way through it is betweeen the two: {part}");
-        assert_eq!(app.switch_shown(Switch::Vibrate, 1_160), 0.0, "and it arrives");
-        // Nothing else moves while it does.
-        assert_eq!(app.switch_shown(Switch::AlwaysOn, 1_080), 0.0, "another switch stands still");
-    }
-
-    #[test]
-    fn a_switch_asked_for_again_mid_turn_carries_on_from_where_it_had_got() {
-        let mut app = App::new(Screen::Settings, W, H, PPD);
-        app.act(Action::Toggle(Switch::Vibrate), 1_000);
-        let part = app.switch_shown(Switch::Vibrate, 1_080);
-        // Touched again before it lands: it must not jump back to 1 first.
-        app.act(Action::Toggle(Switch::Vibrate), 1_080);
-        assert_eq!(app.switch_shown(Switch::Vibrate, 1_080), part, "it turns from where it had got to");
-        assert_eq!(app.switch_shown(Switch::Vibrate, 1_080 + 200), 1.0, "and turns back on");
-    }
-
-    #[test]
-    fn a_moving_switch_keeps_the_panel_drawing_until_it_stops() {
-        let mut app = App::new(Screen::Settings, W, H, PPD);
-        assert!(!app.switch_moving(0), "nothing turns at first");
-        app.act(Action::Toggle(Switch::Vibrate), 1_000);
-        assert!(app.switch_moving(1_080), "and while it turns the panel keeps drawing");
-        assert!(!app.switch_moving(1_000 + 200), "once it has landed there is nothing to draw");
-    }
-
-    #[test]
-    fn a_kept_credential_is_tried_by_itself_only_where_it_is_wanted_and_useful() {
-        let mut app = App::new(Screen::Decrypt, W, H, PPD);
-        app.state.remember_password = true;
-        app.state.remembered = Some("1234".into());
-        // The owner's files are shut and one was kept: try it.
-        assert_eq!(app.auto_attempt(true).as_deref(), Some("1234"));
-        // Nothing shut means nothing to try it against.
-        assert_eq!(app.auto_attempt(false), None);
-        // The switch off means never, whatever was kept.
-        app.state.remember_password = false;
-        assert_eq!(app.auto_attempt(true), None);
-        // And nothing kept means nothing to try.
-        app.state.remember_password = true;
-        app.state.remembered = None;
-        assert_eq!(app.auto_attempt(true), None);
-    }
-
-    #[test]
-    fn a_kept_credential_the_phone_refuses_is_not_kept_any_more() {
-        let mut app = App::new(Screen::Decrypt, W, H, PPD);
-        app.state.remember_password = true;
-        app.state.remembered = Some("an old password".into());
-        // Refused: the owner changed it. Trying it at every start would
-        // only add a refusal to the log each time.
-        assert_eq!(app.forget_password(), vec![Effect::RememberPassword(None)]);
-        assert!(app.state.remembered.is_none());
-        assert!(app.state.remember_password, "the switch stays on for the next one");
-    }
-
     #[test]
     fn the_two_tap_switch_shows_only_where_the_panel_offers_it_and_starts_off() {
         let (f, i) = (fonts(), info());
@@ -10252,7 +10093,7 @@ mod tests {
             let mut app = App::new(Screen::Home, W, H, PPD);
             (app.state.dual_boot, app.state.systems) = (true, Some(Ok(systems)));
             let t = app.theme();
-            let cx = Ctx { switch: None, t: &t, f: &f, info: &i, state: &app.state, term: None, band: None };
+            let cx = Ctx { t: &t, f: &f, info: &i, state: &app.state, term: None, band: None };
             pages::render(Screen::Home, &cx).canvas.data.clone()
         };
         assert!(named(two_systems()) != named(Overview { other_starts: true, ..two_systems() }), "the home page names the one that starts");
@@ -11265,7 +11106,7 @@ mod tests {
         app.act(Action::Open(Screen::Wlan), 0);
         assert_eq!(app.screen(), Screen::Wlan);
         let t = app.theme();
-        let drawn = pages::render(Screen::Wlan, &Ctx { switch: None, t: &t, f: &f, info: &i, state: &app.state, term: None, band: None });
+        let drawn = pages::render(Screen::Wlan, &Ctx { t: &t, f: &f, info: &i, state: &app.state, term: None, band: None });
         assert!(drawn.canvas.data.iter().any(|&b| b != 0), "the WLAN page draws with no radio behind it");
         assert_eq!(app.key(Key::Back, 0), Vec::<Effect>::new(), "leaving it costs nothing");
         assert_eq!(app.screen(), Screen::Home, "the other pages are reachable");

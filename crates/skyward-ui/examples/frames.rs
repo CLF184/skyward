@@ -185,7 +185,7 @@ fn renders(f: &Fonts, i: &DeviceInfo, only: Option<&str>, quiet: bool) {
     for t in [Theme::light(W, H, PPD), Theme::light(W, H, PPD).pressed()] {
         for screen in screens.into_iter().filter(|s| only.is_none_or(|o| format!("{s:?}") == o)) {
             let time = |band| {
-                let cx = Ctx { t: &t, f, info: i, state: &state, term: None, band, switch: None };
+                let cx = Ctx { t: &t, f, info: i, state: &state, term: None, band };
                 let mut ms: Vec<f64> = (0..5)
                     .map(|_| {
                         let t0 = Instant::now();

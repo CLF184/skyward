@@ -1341,10 +1341,7 @@ pub enum Trail<'a> {
     Value(&'a str),
     /// Right-aligned grey text with no chevron (read-only information).
     Text(&'a str),
-    /// A switch, and how far it is between off and on: 0 is off, 1 is on, and
-    /// anything between is on its way. A page that turns one gives the level
-    /// it has reached, so that a touch reads as a thing moving.
-    Switch(f32),
+    Switch(bool),
     Badge(&'a str),
     Check(bool),
     /// A WLAN network's padlock, where joining it takes a password, and the
@@ -1393,14 +1390,9 @@ impl<'a> Row<'a> {
         self.trail = trail;
         self
     }
-    /// The row with a switch at `on`, drawn where it stands with nothing
-    /// moving. A page that animates one uses [`Row::switch_at`] instead.
-    pub fn switch(self, on: bool) -> Self {
-        self.switch_at(if on { 1.0 } else { 0.0 })
-    }
-    /// The row with a switch `level` of the way on.
-    pub fn switch_at(mut self, level: f32) -> Self {
-        self.trail = Trail::Switch(level);
+    /// The row with a switch at `on`.
+    pub fn switch(mut self, on: bool) -> Self {
+        self.trail = Trail::Switch(on);
         self
     }
     pub fn tint(mut self, color: Rgba) -> Self {
@@ -1510,7 +1502,7 @@ fn draw_row(c: &mut Canvas, t: &Theme, f: &Fonts, r: &Row, lay: &Layout, top: f3
             let w = c.text_width(&f.value, s, m.sub_px);
             c.text_vc(&f.value, s, right - m.inner - w, cy, m.sub_px, tone.value, None);
         }
-        Trail::Switch(level) => switch(c, t, right - m.inner, cy, level),
+        Trail::Switch(on) => switch(c, t, right - m.inner, cy, on),
         Trail::Badge(s) => {
             let (bw, bh) = (m.badge_w, m.badge_h);
             let bx = right - m.inner - bw;
@@ -1752,18 +1744,12 @@ fn stat_strip(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, items: &[Stat]) ->
     bottom
 }
 
-/// A switch at `level` of the way on, 0 at the left and 1 at the right: the
-/// knob slides and the track goes from grey to the accent colour as it is
-/// turned, so that a touch reads as a thing moving rather than a thing
-/// appearing.
-pub fn switch(c: &mut Canvas, t: &Theme, right: f32, cy: f32, level: f32) {
+pub fn switch(c: &mut Canvas, t: &Theme, right: f32, cy: f32, on: bool) {
     let m = &t.m;
     let (w, h, k) = (m.switch_w, m.switch_h, m.knob);
-    let level = level.clamp(0.0, 1.0);
     let x = right - w;
-    let track = t.pal.switch_off.blend(t.pal.accent, level);
-    c.fill_round_rect(x, cy - h / 2.0, w, h, h / 2.0, track);
-    let kx = x + h / 2.0 + (w - h) * level;
+    c.fill_round_rect(x, cy - h / 2.0, w, h, h / 2.0, if on { t.pal.accent } else { t.pal.switch_off });
+    let kx = if on { right - h / 2.0 } else { x + h / 2.0 };
     c.fill_circle(kx, cy, k / 2.0, Rgba::rgb(255, 255, 255));
 }
 
