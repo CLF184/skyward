@@ -14,6 +14,14 @@ impl Rgba {
     pub const fn with_alpha(self, a: u8) -> Self {
         Self { a, ..self }
     }
+
+    /// This colour `t` of the way to `other`, 0 as itself and 1 as `other`:
+    /// what a switch's track is drawn with as it is turned.
+    pub fn blend(self, other: Rgba, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+        Rgba { r: mix(self.r, other.r), g: mix(self.g, other.g), b: mix(self.b, other.b), a: mix(self.a, other.a) }
+    }
 }
 
 /// Linear blend from `a` (at 0) to `b` (at 1).

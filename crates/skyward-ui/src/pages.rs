@@ -50,6 +50,48 @@ pub struct Ctx<'a> {
     /// The part of the page to draw; all of it if none is given. The page
     /// is laid out whole either way.
     pub band: Option<Band>,
+    /// How far on to draw a switch: 1 or 0 where it stands still, the way
+    /// there while it turns. None leaves every switch where the settings
+    /// have it, which is what a page drawn once — in a test, or for a
+    /// preview — wants.
+    pub switch: Option<&'a dyn Fn(Switch) -> f32>,
+}
+
+impl<'a> Ctx<'a> {
+    /// How far on to draw `switch`: where the settings have it, unless the
+    /// app says it is on its way somewhere.
+    pub fn switch_at(&self, switch: Switch) -> f32 {
+        match self.switch {
+            Some(level) => level(switch),
+            None => {
+                // The page is drawn by something that does not animate
+                // switches; the settings are all there is to go by.
+                if switch_on(self.state, switch) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+/// Where `state` has `switch`.
+pub fn switch_on(state: &State, switch: Switch) -> bool {
+    match switch {
+        Switch::Vibrate => state.vibrate,
+        Switch::FileTransfer => state.file_transfer,
+        Switch::Compress => state.compress,
+        Switch::Verify => state.verify,
+        Switch::Signature => state.check_signature,
+        Switch::KeepRecovery => state.keep_recovery,
+        Switch::DisableAvb => state.disable_avb,
+        Switch::RememberPassword => state.remember_password,
+        Switch::ShowPassword => state.show_password,
+        Switch::AlwaysOn => state.always_on,
+        Switch::DoubleTap => state.double_tap,
+        Switch::Wlan => state.wlan.as_ref().is_some_and(|w| !matches!(w.power, Power::Off | Power::Failed(_))),
+    }
 }
 
 /// Rows `rows` of a page, and of them the columns `cols`, each from the
@@ -397,7 +439,7 @@ pub fn settings(cx: &Ctx) -> Frame {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
     y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["振动", "震動", "Vibration"]));
-    let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
+    let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).switch_at(cx.switch_at(Switch::Vibrate));
     let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
     out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });
     if let Some(r) = vibration.below {
@@ -412,7 +454,7 @@ pub fn settings(cx: &Ctx) -> Frame {
     let mut y = vibration.bottom;
     if s.panel_dozes {
         y = widgets::section(&mut c, t, f, y, l.pick(["息屏显示", "螢幕關閉顯示", "Always-on display"]));
-        let on = Row::new(l.pick(ALWAYS_ON)).trail(Trail::Switch(s.always_on));
+        let on = Row::new(l.pick(ALWAYS_ON)).switch_at(cx.switch_at(Switch::AlwaysOn));
         let aod = widgets::list(&mut c, t, f, y, &[on]);
         out.extend(hits(&aod.rows, &[Action::Toggle(Switch::AlwaysOn)]));
         let note = l.pick([
@@ -433,7 +475,7 @@ pub fn settings(cx: &Ctx) -> Frame {
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
     ];
     if s.panel_taps {
-        rows.push(Row::new(l.pick(DOUBLE_TAP)).trail(Trail::Switch(s.double_tap)));
+        rows.push(Row::new(l.pick(DOUBLE_TAP)).switch_at(cx.switch_at(Switch::DoubleTap)));
     }
     let general = widgets::list(&mut c, t, f, y, &rows);
     let mut actions = vec![Action::Open(Screen::Language), Action::Open(Screen::TimeZone)];
@@ -442,7 +484,7 @@ pub fn settings(cx: &Ctx) -> Frame {
     }
     out.extend(hits(&general.rows, &actions));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
-    let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
+    let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).switch_at(cx.switch_at(Switch::FileTransfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
     let note = l.pick([
         "开启后，可在电脑上管理内部存储中的文件，需先完成「解密」。",
@@ -454,7 +496,7 @@ pub fn settings(cx: &Ctx) -> Frame {
     // so it is asked for rather than given, and the row says what it costs.
     if s.data != Data::Erased {
         let remember = widgets::section(&mut c, t, f, y, l.pick(["解密", "解密", "Decryption"]));
-        let row = Row::new(l.pick(REMEMBER_PASSWORD)).trail(Trail::Switch(s.remember_password));
+        let row = Row::new(l.pick(REMEMBER_PASSWORD)).switch_at(cx.switch_at(Switch::RememberPassword));
         let rows = widgets::list(&mut c, t, f, remember, &[row]);
         out.extend(hits(&rows.rows, &[Action::Toggle(Switch::RememberPassword)]));
         let note = l.pick([
@@ -557,7 +599,7 @@ pub fn mount(cx: &Ctx) -> Frame {
                 .iter()
                 .zip(&subs)
                 .map(|(m, sub)| {
-                    let trail = if m.holders.is_empty() { Trail::Switch(m.mounted) } else { Trail::Text(l.pick(["使用中", "使用中", "In use"])) };
+                    let trail = if m.holders.is_empty() { Trail::Switch(if m.mounted { 1.0 } else { 0.0 }) } else { Trail::Text(l.pick(["使用中", "使用中", "In use"])) };
                     Row::new(&m.base).subtitle(sub).trail(trail)
                 })
                 .collect();
@@ -1066,13 +1108,13 @@ pub fn install(cx: &Ctx) -> Frame {
     });
     let y = widgets::footnote(&mut c, t, f, methods.bottom, what);
     let y = widgets::section(&mut c, t, f, y, l.pick(["选项", "選項", "Options"]));
-    let check = Row::new(l.pick(["验证刷机包签名", "驗證刷機包簽章", "Verify zip signatures"])).trail(Trail::Switch(cx.state.check_signature));
+    let check = Row::new(l.pick(["验证刷机包签名", "驗證刷機包簽章", "Verify zip signatures"])).switch_at(cx.switch_at(Switch::Signature));
     let signature = widgets::list(&mut c, t, f, y, &[check]);
     out.extend(hits(&signature.rows, &[Action::Toggle(Switch::Signature)]));
     let note = l.pick(["开启后，仅安装带有本机官方签名的刷机包。", "開啟後，僅安裝帶有本機官方簽章的刷機包。", "When on, only zips signed with this phone's official keys install."]);
     let mut y = widgets::footnote(&mut c, t, f, signature.bottom, note);
     if cx.state.recovery_partitions {
-        let row = Row::new(l.pick(["自动重新刷入 Skyward", "自動重新刷入 Skyward", "Flash Skyward again"])).trail(Trail::Switch(cx.state.keep_recovery));
+        let row = Row::new(l.pick(["自动重新刷入 Skyward", "自動重新刷入 Skyward", "Flash Skyward again"])).switch_at(cx.switch_at(Switch::KeepRecovery));
         let options = widgets::list(&mut c, t, f, y + t.m.card_gap, &[row]);
         out.extend(hits(&options.rows, &[Action::Toggle(Switch::KeepRecovery)]));
         let note = l.pick([
@@ -1091,7 +1133,7 @@ pub fn install(cx: &Ctx) -> Frame {
         "刷入 ROM 後自動停用 AVB 驗證",
         "Disable AVB checks after a ROM is installed",
     ]))
-    .trail(Trail::Switch(cx.state.disable_avb));
+    .switch_at(cx.switch_at(Switch::DisableAvb));
     let rows = widgets::list(&mut c, t, f, y + t.m.card_gap, &[avb]);
     out.extend(hits(&rows.rows, &[Action::Toggle(Switch::DisableAvb)]));
     let note = l.pick([
@@ -2011,8 +2053,8 @@ pub fn backup(cx: &Ctx) -> Frame {
     out.extend(hits(&places.rows, &[Action::BackupTo(Place::Storage), Action::BackupTo(Place::UsbDrive)]));
     let y = widgets::section(&mut c, t, f, places.bottom, l.pick(["选项", "選項", "Options"]));
     let options = widgets::list(&mut c, t, f, y, &[
-        Row::new(l.pick(["压缩", "壓縮", "Compress"])).subtitle(l.pick(["备份更小，耗时更长", "備份更小，耗時更長", "Smaller, and slower to make"])).trail(Trail::Switch(s.compress)),
-        Row::new(l.pick(["完成后校验", "完成後驗證", "Verify when done"])).subtitle(l.pick(["确认备份文件完整", "確認備份檔案完整", "Checks the backup's files are whole"])).trail(Trail::Switch(s.verify)),
+        Row::new(l.pick(["压缩", "壓縮", "Compress"])).subtitle(l.pick(["备份更小，耗时更长", "備份更小，耗時更長", "Smaller, and slower to make"])).switch_at(cx.switch_at(Switch::Compress)),
+        Row::new(l.pick(["完成后校验", "完成後驗證", "Verify when done"])).subtitle(l.pick(["确认备份文件完整", "確認備份檔案完整", "Checks the backup's files are whole"])).switch_at(cx.switch_at(Switch::Verify)),
     ]);
     out.extend(hits(&options.rows, &[Action::Toggle(Switch::Compress), Action::Toggle(Switch::Verify)]));
     let note = l.pick([
@@ -2413,6 +2455,8 @@ pub fn avb(cx: &Ctx) -> Frame {
                 l.pick(["已解锁", "已解鎖", "Unlocked"]).to_string(),
             ),
         ]);
+        // A card's bottom is where it ends, not where the next one starts:
+        // the gap between two of them is the one every other page leaves.
         let rows: Vec<Row> = [
             (
                 Check::Verification,
@@ -2431,10 +2475,10 @@ pub fn avb(cx: &Ctx) -> Frame {
                 Some((_, pending, want)) if pending == check => !*want,
                 _ => state.disabled(*check),
             };
-            Row::new(label).subtitle(what).trail(Trail::Switch(!disabled))
+            Row::new(label).subtitle(what).switch_at(if disabled { 0.0 } else { 1.0 })
         })
         .collect();
-        let list = widgets::list(&mut c, t, f, y, &rows);
+        let list = widgets::list(&mut c, t, f, y + t.m.card_gap, &rows);
         out.extend(hits(&list.rows, &[Action::AvbToggle(Check::Verification), Action::AvbToggle(Check::Verity)]));
         y = list.bottom;
         let explain = l.pick([
@@ -3125,8 +3169,7 @@ pub fn wlan(cx: &Ctx) -> Frame {
     let mut c = long_page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
-    let on = !matches!(w.power, Power::Off | Power::Failed(_));
-    let switch = widgets::list(&mut c, t, f, top, &[Row::new(l.pick(WLAN)).trail(Trail::Switch(on))]);
+    let switch = widgets::list(&mut c, t, f, top, &[Row::new(l.pick(WLAN)).switch_at(cx.switch_at(Switch::Wlan))]);
     out.extend(hits(&switch.rows, &[Action::Toggle(Switch::Wlan)]));
     let mut y = switch.bottom;
     match &w.power {
@@ -3223,7 +3266,7 @@ pub fn wlan_password(cx: &Ctx) -> Frame {
     let y = widgets::section_first(&mut c, t, f, top, &network.name);
     let shown = if s.show_password { s.password.clone() } else { "•".repeat(s.password.chars().count()) };
     let (y, caret) = widgets::text_field(&mut c, t, f, y, &shown);
-    let show = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(SHOW_PASSWORD)).trail(Trail::Switch(s.show_password))]);
+    let show = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(SHOW_PASSWORD)).switch_at(cx.switch_at(Switch::ShowPassword))]);
     out.extend(hits(&show.rows, &[Action::Toggle(Switch::ShowPassword)]));
     keyboard_hits(&mut c, t, f, s, l.pick(CONNECT_KEY), &mut out);
     Frame { caret: Some(caret), ..Frame::new(t, c, out, l.pick(["输入密码", "輸入密碼", "Enter password"]), top) }
@@ -3257,7 +3300,7 @@ pub fn wlan_add(cx: &Ctx) -> Frame {
         if a.field == Field::Password {
             caret = typed;
         }
-        let show = widgets::list(&mut c, t, f, below + m.card_gap, &[Row::new(l.pick(SHOW_PASSWORD)).trail(Trail::Switch(s.show_password))]);
+        let show = widgets::list(&mut c, t, f, below + m.card_gap, &[Row::new(l.pick(SHOW_PASSWORD)).switch_at(cx.switch_at(Switch::ShowPassword))]);
         out.extend(hits(&show.rows, &[Action::Toggle(Switch::ShowPassword)]));
     }
     keyboard_hits(&mut c, t, f, s, l.pick(CONNECT_KEY), &mut out);
@@ -3525,7 +3568,7 @@ pub fn permissions(cx: &Ctx) -> Frame {
     let special = (l.pick(["特殊权限", "特殊權限", "Special"]), [("SUID", 0o4000), ("SGID", 0o2000), (l.pick(["粘滞位", "黏滯位", "Sticky"]), 0o1000)]);
     for (title, bits) in groups.into_iter().chain([special]) {
         y = widgets::section(&mut c, t, f, y, title);
-        let rows = bits.map(|(name, bit)| Row::new(name).trail(Trail::Switch(mode & bit != 0)));
+        let rows = bits.map(|(name, bit)| Row::new(name).switch_at(if mode & bit != 0 { 1.0 } else { 0.0 }));
         let list = widgets::list(&mut c, t, f, y, &rows);
         out.extend(hits(&list.rows, &bits.map(|(_, bit)| Action::ModeBit(bit))));
         y = list.bottom;
