@@ -1,9 +1,8 @@
 name: Build
 
-# Every push is linted and tested, and the recovery is built for every
-# device in devices/, each image zipped. A tag starting with v publishes
-# those zips as a release, each shown as the phone it is for. Run by hand,
-# it can build for one device alone.
+# Every push is linted and tested and builds a zipped recovery for piano.
+# A tag starting with v publishes the zip as a release. A manual run can
+# select another device from devices/.
 on:
   push:
     branches: ["**"]
@@ -11,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: The codename of the one device to build for; every device when empty
+        description: Device codename (defaults to piano)
         required: false
         default: ""
 
@@ -90,7 +89,7 @@ jobs:
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
           else
-            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+            echo 'devices=["piano"]' >> "$GITHUB_OUTPUT"
           fi
 
   recovery:
