@@ -83,6 +83,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
         Screen::DiskMaintenance => disk_maintenance(cx),
+        Screen::PartitionTables => partition_tables(cx),
         Screen::Resources => resources(cx),
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
@@ -2316,6 +2317,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
 
 const MASS_STORAGE: Text = ["开启 USB 大容量存储", "開啟 USB 大容量儲存", "Enable USB mass storage"];
 const REPAIR_GPT: Text = ["修复 GPT", "修復 GPT", "Repair GPT"];
+const PRINT_PARTITION_TABLES: Text = ["打印分区表", "列印分割表", "Print partition tables"];
 const DISK_MAINTENANCE: Text = ["磁盘维护", "磁碟維護", "Disk maintenance"];
 const RELABEL: Text = ["修复 SELinux 上下文", "修復 SELinux 上下文", "Fix SELinux contexts"];
 const FILESYSTEMS: Text = ["文件系统", "檔案系統", "Filesystems"];
@@ -2327,23 +2329,28 @@ const STOPPING: Text = ["正在停止", "正在停止", "Stopping"];
 /// page never returns to Advanced: it ends at a restart.
 pub fn disk_maintenance(cx: &Ctx) -> Frame {
     let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
-    let mut c = page(cx);
     let mut out = Vec::new();
     let top = t.m.content_top;
     let work: &DiskMaintenance = &s.disk_maintenance;
     if !work.entered {
+        let mut c = long_page(cx);
+        let print = widgets::list(&mut c, t, f, top, &[
+            Row::new(l.pick(PRINT_PARTITION_TABLES)).icon(BLUE, Icon::Mount),
+        ]);
+        out.extend(hits(&print.rows, &[Action::Open(Screen::PartitionTables)]));
         let warning = l.pick([
             "这些操作会停止使用磁盘的服务、卸载分区或重写分区表。进入后无法返回，只能重启 Recovery。",
             "這些操作會停止使用磁碟的服務、卸載分割區或重寫分割表。進入後無法返回，只能重新啟動 Recovery。",
             "These tools stop services that use the disk, unmount partitions or rewrite partition tables. Once entered, the only way out is restarting recovery.",
         ]);
-        let y = widgets::paragraph(&mut c, t, f, top, warning);
+        let y = widgets::paragraph(&mut c, t, f, print.bottom + t.m.card_gap, warning);
         let (label, danger) = confirm_label(Confirm::DiskMaintenance, s);
         let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::DiskMaintenance) });
-        return Frame::new(t, c, out, l.pick(DISK_MAINTENANCE), top);
+        return Frame::new(t, fit(c, t, track.y + track.h), out, l.pick(DISK_MAINTENANCE), top);
     }
 
+    let mut c = page(cx);
     match work.tool {
         None => {
             let y = widgets::section_first(&mut c, t, f, top, l.pick(["选择维护操作", "選擇維護操作", "Choose maintenance"]));
@@ -2397,6 +2404,21 @@ pub fn disk_maintenance(cx: &Ctx) -> Frame {
         }
     }
     Frame { back: false, ..Frame::new(t, c, out, l.pick(DISK_MAINTENANCE), top) }
+}
+
+fn partition_tables(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let mut c = page(cx);
+    let top = t.m.content_top;
+    let lines = &s.disk_maintenance.partition_tables;
+    let rows = if lines.is_empty() {
+        widgets::paragraph(&mut c, t, f, top, s.lang.pick(["正在读取分区表…", "正在讀取分割表…", "Reading partition tables…"]));
+        None
+    } else {
+        Some(Rows { edges: widgets::output_edges(&c, t, f, top, lines), action: None })
+    };
+    let title = s.lang.pick(["分区表", "分割表", "Partition tables"]);
+    Frame { rows, ..Frame::new(t, c, Vec::new(), title, top) }
 }
 
 /// Files in Skyward's shared GitHub resource release.
@@ -3465,6 +3487,7 @@ pub fn row(screen: Screen, cx: &Ctx, i: usize, c: &mut Canvas) {
             files::row(c, cx.t, cx.f, cx.state.lang, &entries[i], folder.listed, cx.state.time_zone);
         }
         Screen::Installing => widgets::output_row(c, cx.t, cx.f, &cx.state.script_output, i),
+        Screen::PartitionTables => widgets::output_row(c, cx.t, cx.f, &cx.state.disk_maintenance.partition_tables, i),
         Screen::PartWork => {
             let work = cx.state.part_work.as_ref().expect("the page of partition work shows work");
             widgets::output_row(c, cx.t, cx.f, &work.output, i)

@@ -65,6 +65,8 @@ pub enum Screen {
     /// Whole-disk work that may take the touchscreen away: chosen and
     /// watched with the volume and power keys once entered.
     DiskMaintenance,
+    /// Read-only output of listing the configured disks' partition tables.
+    PartitionTables,
     /// Files in Skyward's shared resource release.
     Resources,
     Files,
@@ -959,6 +961,7 @@ pub struct DiskMaintenance {
     pub running: bool,
     /// What the tool did, or why it stopped. Once set, only restarts remain.
     pub result: Option<Result<String, String>>,
+    pub partition_tables: Vec<String>,
 }
 
 /// What the wipe page erases: everything a factory reset erases, or any of
@@ -2236,6 +2239,8 @@ pub enum Effect {
     /// Read the partitions for the filesystem page, which has just opened,
     /// telling them with [`App::set_filesystems`].
     ReadFilesystems,
+    /// Read the partition tables on the configured disks.
+    PrintPartitionTables,
     /// Export the main UFS LUN to a computer as USB mass storage. Restarting
     /// the recovery takes the export away.
     EnableMassStorage,
@@ -3021,6 +3026,11 @@ impl App {
         work.running = false;
         work.result = Some(result);
         self.state.confirm = 0.0;
+        self.refresh();
+    }
+
+    pub fn set_partition_tables(&mut self, lines: Vec<String>) {
+        self.state.disk_maintenance.partition_tables = lines;
         self.refresh();
     }
 
@@ -5475,6 +5485,10 @@ impl App {
         match s {
             Screen::Mount => vec![Effect::ReadMounts],
             Screen::Filesystems => vec![Effect::ReadFilesystems],
+            Screen::PartitionTables => {
+                self.state.disk_maintenance.partition_tables.clear();
+                vec![Effect::PrintPartitionTables]
+            }
             Screen::Slot | Screen::Reboot => vec![Effect::ReadSlots],
             Screen::Systems => vec![Effect::ReadSystems],
             Screen::Restore => vec![self.find_backups()],
