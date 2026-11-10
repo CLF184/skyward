@@ -700,11 +700,19 @@ fn place(file: &Firmware) -> Result<()> {
     let bytes = match &file.partition {
         None => fs::read(&file.path).with_context(|| format!("read {}", file.path))?,
         Some(partition) => {
-            let at = Path::new(PARTITIONS).join(partition);
-            fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
-            skyward_block::mount::mount_ro(&Path::new(skyward_block::BY_NAME).join(partition), &at)?;
-            let read = fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path));
-            skyward_block::mount::umount(&at)?;
+            let device = Path::new(skyward_block::BY_NAME).join(partition);
+            let existing = skyward_block::mount::points_of(skyward_block::devnum(&device)?)?.into_iter().next();
+            let read = match existing {
+                Some(at) => fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path)),
+                None => {
+                    let at = Path::new(PARTITIONS).join(partition);
+                    fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
+                    skyward_block::mount::mount_ro(&device, &at)?;
+                    let read = fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path));
+                    skyward_block::mount::umount(&at)?;
+                    read
+                }
+            };
             match read {
                 Ok(bytes) => bytes,
                 Err(e) if file.optional && e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {
