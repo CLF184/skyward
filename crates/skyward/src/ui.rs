@@ -1277,6 +1277,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // The credential just typed, held until the phone says whether it opened
     // anything: a password a phone turns down is not one to write down.
     let mut unlock_typed: Option<(u32, String)> = None;
+    // Whether the credential in hand was the one kept from an earlier
+    // start rather than one typed at the page: a kept one the phone
+    // refuses is thrown away, where a typed one is simply wrong.
+    let mut unlock_auto = false;
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
@@ -2324,6 +2328,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     closed = opening.closed;
                     show_closed(&mut app, &closed)?;
+                    // The owner's files are still shut and a credential was
+                    // kept for them: try it without asking, which is the whole
+                    // point of the switch. A credential the phone no longer
+                    // takes is thrown away rather than tried at every start.
+                    let owner_shut = closed.iter().any(|c| c.user == 0 && !c.made_up);
+                    if let Some(code) = app.auto_attempt(owner_shut) {
+                        skyward_sys::kmsg("the kept credential is being tried on the data partition")?;
+                        let job = decrypt::Job::Unlock { closed: closed.clone(), user: 0, credential: code.clone().into_bytes() };
+                        decryptor = Some(Decryptor::start(job)?);
+                        unlock_typed = Some((0, code));
+                        unlock_auto = true;
+                    }
                 }
                 decrypt::Ended::Opened(Err(why)) => {
                     skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;
@@ -2348,11 +2364,30 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // is not kept.
                     if let Some((user, code)) = unlock_typed.take() {
                         if user == 0 && app.state.remember_password && app.state.remembered.as_deref() != Some(code.as_str()) {
-                            app.keep_password(code);
+                            // Written here rather than queued as an effect:
+                            // this is what puts the sealed file on /metadata,
+                            // and an effect dropped on the floor is a switch
+                            // that does nothing at all.
+                            app.state.remembered = Some(code.clone());
+                            match crate::remembered::save(&code) {
+                                Ok(()) => skyward_sys::kmsg("the credential that opened the phone is kept")?,
+                                Err(e) => {
+                                    let _ = skyward_sys::kmsg(&format!("the credential is not kept: {e:#}"));
+                                }
+                            }
                         }
                     }
                 }
                 decrypt::Ended::Unlocked(Err(why)) => {
+                    // A kept credential the phone will not take is not
+                    // kept any more: the owner changed it, and trying
+                    // it again at every start would only add a refusal
+                    // to the log each time.
+                    if std::mem::take(&mut unlock_auto) {
+                        skyward_sys::kmsg(&format!("the kept credential was not taken, and is forgotten: {why}"))?;
+                        app.forget_password();
+                        unlock_typed = None;
+                    }
                     // Which user the credential was for, so that a page
                     // holding the recovery at a second space's prompt is not
                     // read as the owner's own credential being wrong.

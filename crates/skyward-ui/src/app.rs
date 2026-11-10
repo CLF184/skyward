@@ -3408,6 +3408,26 @@ impl App {
         self.dirty = true;
     }
 
+    /// The credential to try by itself at this start, where the owner's
+    /// files are still shut and one was kept for them: what the decrypt
+    /// page would have been asked for, taken without asking. `owner_shut`
+    /// says the phone's files did not open with nothing known, which is
+    /// the only case a credential is any use in.
+    pub fn auto_attempt(&self, owner_shut: bool) -> Option<String> {
+        if !self.state.remember_password || !owner_shut {
+            return None;
+        }
+        self.state.remembered.clone()
+    }
+
+    /// The kept credential was refused, so it is not the phone's any more:
+    /// a credential left behind after a password change would be tried and
+    /// refused at every start.
+    pub fn forget_password(&mut self) -> Vec<Effect> {
+        self.state.remembered = None;
+        vec![Effect::RememberPassword(None)]
+    }
+
     /// A credential that opened the phone's files, to be written down
     /// where the owner asked for it to be kept.
     pub fn keep_password(&mut self, code: String) -> Vec<Effect> {
@@ -8602,6 +8622,36 @@ mod tests {
         app.act(Action::Toggle(Switch::Vibrate), 1_000);
         assert!(app.switch_moving(1_080), "and while it turns the panel keeps drawing");
         assert!(!app.switch_moving(1_000 + 200), "once it has landed there is nothing to draw");
+    }
+
+    #[test]
+    fn a_kept_credential_is_tried_by_itself_only_where_it_is_wanted_and_useful() {
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.state.remember_password = true;
+        app.state.remembered = Some("1234".into());
+        // The owner's files are shut and one was kept: try it.
+        assert_eq!(app.auto_attempt(true).as_deref(), Some("1234"));
+        // Nothing shut means nothing to try it against.
+        assert_eq!(app.auto_attempt(false), None);
+        // The switch off means never, whatever was kept.
+        app.state.remember_password = false;
+        assert_eq!(app.auto_attempt(true), None);
+        // And nothing kept means nothing to try.
+        app.state.remember_password = true;
+        app.state.remembered = None;
+        assert_eq!(app.auto_attempt(true), None);
+    }
+
+    #[test]
+    fn a_kept_credential_the_phone_refuses_is_not_kept_any_more() {
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.state.remember_password = true;
+        app.state.remembered = Some("an old password".into());
+        // Refused: the owner changed it. Trying it at every start would
+        // only add a refusal to the log each time.
+        assert_eq!(app.forget_password(), vec![Effect::RememberPassword(None)]);
+        assert!(app.state.remembered.is_none());
+        assert!(app.state.remember_password, "the switch stays on for the next one");
     }
 
     #[test]

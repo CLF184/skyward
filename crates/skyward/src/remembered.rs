@@ -79,6 +79,12 @@ fn identity() -> Vec<u8> {
 }
 
 /// Seal `credential` and write it where a later start finds it.
+///
+/// `/metadata` is kept read-only by the recovery and made writable only for
+/// the length of a write, as the settings file is: a plain `fs::write` here
+/// fails with a read-only filesystem and the credential is silently never
+/// kept, which is what happened before this took the mount's mode into
+/// account.
 pub fn save(credential: &str) -> Result<()> {
     if credential.is_empty() || credential.len() > MOST {
         bail!("a credential of {} bytes is not one to keep", credential.len());
@@ -91,10 +97,23 @@ pub fn save(credential: &str) -> Result<()> {
     file.extend_from_slice(MAGIC);
     file.extend_from_slice(nonce.as_slice());
     file.extend_from_slice(&sealed);
+    // Made writable for the write alone, and read-only again after it
+    // whether the write worked or not.
+    skyward_vab::metadata_writable(true).context("make /metadata writable")?;
+    let wrote = write_file(&file);
+    let back = skyward_vab::metadata_writable(false);
+    // The write's own failure is the one worth reading; a mount left
+    // writable is said too, so that it is not lost.
+    wrote?;
+    back.context("make /metadata read-only again")
+}
+
+/// The sealed credential into its file, flushed, then moved into place.
+fn write_file(sealed: &[u8]) -> Result<()> {
     if let Some(folder) = Path::new(FILE).parent() {
         fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
     }
-    fs::write(WRITING, &file).with_context(|| format!("write {WRITING}"))?;
+    fs::write(WRITING, sealed).with_context(|| format!("write {WRITING}"))?;
     // Flushed and moved into place, so a start cut off in the middle leaves
     // either the old credential or the new one and never half of either.
     fs::File::open(WRITING).and_then(|f| f.sync_all()).with_context(|| format!("flush {WRITING}"))?;
@@ -129,12 +148,23 @@ pub fn load() -> Option<String> {
 }
 
 /// Take the kept credential away, where one is kept.
+///
+/// The file lives on a mount the recovery keeps read-only, so it is made
+/// writable for the removal alone. A file that is not there is what this
+/// wanted anyway.
 pub fn forget() -> Result<()> {
-    match fs::remove_file(FILE) {
+    if !Path::new(FILE).exists() {
+        return Ok(());
+    }
+    skyward_vab::metadata_writable(true).context("make /metadata writable")?;
+    let removed = match fs::remove_file(FILE) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("remove {FILE}")),
-    }
+    };
+    let back = skyward_vab::metadata_writable(false);
+    removed?;
+    back.context("make /metadata read-only again")
 }
 
 #[cfg(test)]
