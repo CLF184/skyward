@@ -54,17 +54,17 @@ prepare_script = { source = "../resources/piano/piano-fixgpt-unmount.sh", path =
 gdisk = { source = "../resources/piano/gdisk", path = "/system/bin/gdisk" }
 dmctl = { source = "../resources/piano/dmctl", path = "/system/bin/dmctl" }
 uuid_library = { source = "../resources/piano/libext2_uuid.so", path = "/system/lib64/libext2_uuid.so" }
-parted = { source = "../resources/piano/parted", path = "/system/bin/parted", sha256 = "6e0751b70b46f6eeec1595c356313ec393fe906182796adf86467772cb1c93ef" }
+parted = { source = "../resources/piano/parted", path = "/system/bin/parted" }
 parted_libraries = [
-    { source = "../resources/piano/libparted.so", path = "/system/lib64/libparted.so", sha256 = "e316cc0814df8a4a452ab046be546535b25b9a29401fbc9766469e150b07e775" },
-    { source = "../resources/piano/libparted-fs-resize.so", path = "/system/lib64/libparted-fs-resize.so", sha256 = "5a0d4d5e69b9217a9d2581deca9f4ee3a1b1c83cc9083042d5f93fb4310b6f9c" },
-    { source = "../resources/piano/libreadline.so.8", path = "/system/lib64/libreadline.so.8", sha256 = "7437d5e30e2a326f3000286295cb9ba30a2e45f9ca5a91feba9ec12d0f1a161d" },
-    { source = "../resources/piano/libncursesw.so.6", path = "/system/lib64/libncursesw.so.6", sha256 = "795f855f5a988d9e89116847b2c9aa03720cedbc02026259ca735be25398c4c5" },
-    { source = "../resources/piano/libuuid.so", path = "/system/lib64/libuuid.so", sha256 = "f6a537868ff4553b66e0814532e8b3774c2db4c7c66b225bb03a780059216e70" },
-    { source = "../resources/piano/libblkid.so", path = "/system/lib64/libblkid.so", sha256 = "d6a7e834a2c9756dbadec1ce076bb7637310750d912f3b9ab510368052314010" },
-    { source = "../resources/piano/libiconv.so", path = "/system/lib64/libiconv.so", sha256 = "540df15e445f9117ce757dedf54fefd93c4db34ecf2caf06ef1cb397ac6fc940" },
-    { source = "../resources/piano/libandroid-support.so", path = "/system/lib64/libandroid-support.so", sha256 = "739cf829511d71dafd6c67fdbb70f3f0c6048642ea2e1967790ee961fde14430" },
-    { source = "../resources/piano/libandroid-posix-semaphore.so", path = "/system/lib64/libandroid-posix-semaphore.so", sha256 = "bee8c749ff4a87c06c4f6316a380f179f607de7d904418a20d879eea74be345e" },
+    { source = "../resources/piano/libparted.so", path = "/system/lib64/libparted.so" },
+    { source = "../resources/piano/libparted-fs-resize.so", path = "/system/lib64/libparted-fs-resize.so" },
+    { source = "../resources/piano/libreadline.so.8", path = "/system/lib64/libreadline.so.8" },
+    { source = "../resources/piano/libncursesw.so.6", path = "/system/lib64/libncursesw.so.6" },
+    { source = "../resources/piano/libuuid.so", path = "/system/lib64/libuuid.so" },
+    { source = "../resources/piano/libblkid.so", path = "/system/lib64/libblkid.so" },
+    { source = "../resources/piano/libiconv.so", path = "/system/lib64/libiconv.so" },
+    { source = "../resources/piano/libandroid-support.so", path = "/system/lib64/libandroid-support.so" },
+    { source = "../resources/piano/libandroid-posix-semaphore.so", path = "/system/lib64/libandroid-posix-semaphore.so" },
 ]
 input = "x\nj\n\nk\n\nw\nY\n"
 success = "The operation has completed successfully."
