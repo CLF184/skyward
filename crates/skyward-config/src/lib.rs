@@ -1161,6 +1161,7 @@ mod tests {
             [
                 "/vendor/bin/sh",
                 "/odm/bin/touch_report_debug",
+                "/vendor/bin/hw/android.hardware.boot-service.qti",
                 "/vendor/bin/qseecomd",
                 "/vendor/bin/hlosminkdaemon",
                 "/vendor/bin/ssgtzd",
@@ -1169,14 +1170,16 @@ mod tests {
                 "/odm/bin/hw/android.hardware.weaver",
             ]
         );
-        let qsee = &cfg.services[2];
+        let boot = &cfg.services[2];
+        assert_eq!(boot.ready_service.as_deref(), Some("android.hardware.boot.IBootControl/default"));
+        let qsee = &cfg.services[3];
         assert_eq!(qsee.sockets[0].name, "notify-topology");
         assert_eq!(qsee.ready_property.as_deref(), Some("vendor.sys.listeners.registered"));
-        let keymint = &cfg.services[5];
+        let keymint = &cfg.services[6];
         assert_eq!(keymint.ready_service.as_deref(), Some("android.hardware.security.keymint.IKeyMintDevice/default"));
-        let gatekeeper = &cfg.services[6];
+        let gatekeeper = &cfg.services[7];
         assert_eq!(gatekeeper.description.as_deref(), Some("/vendor/etc/vintf/manifest_sun.xml"));
-        let weaver = &cfg.services[7];
+        let weaver = &cfg.services[8];
         assert_eq!(weaver.ready_service.as_deref(), Some("android.hardware.weaver.IWeaver/default"));
         let wlan = cfg.wlan.expect("WLAN");
         assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
