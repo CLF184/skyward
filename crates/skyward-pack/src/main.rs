@@ -205,13 +205,19 @@ fn configure_init(rd: &mut Ramdisk, config: &skyward_config::DeviceConfig) -> Re
     let original = &rd.find(path).context("the stock ramdisk has no Qualcomm recovery init")?.data;
     let mut text = String::from_utf8(original.clone()).context("Qualcomm recovery init is not UTF-8")?;
     if remoteproc {
-        // This stock init uses the pre-remoteproc ADSP loader. Keep its
-        // firmware mounts and battery wait, replacing only the obsolete
-        // loader with the recovery binary's firmware command.
-        let wait = "    wait /sys/kernel/boot_adsp/boot\n";
-        let boot = "    write /sys/kernel/boot_adsp/boot 1\n";
-        ensure!(text.matches(wait).count() == 1 && text.matches(boot).count() == 1,
-            "stock init does not contain the expected legacy ADSP loader");
+        // Keep the stock firmware mounts and battery wait, replacing only
+        // the stock ADSP hand-off with the recovery binary's firmware command.
+        let legacy_wait = "    wait /sys/kernel/boot_adsp/boot\n";
+        let legacy_boot = "    write /sys/kernel/boot_adsp/boot 1\n";
+        let modern_wait = "    wait /sys/kernel/boot_adsp/ssr\n";
+        let modern_boot = "    write /sys/kernel/boot_adsp/ssr 1\n";
+        let legacy =
+            text.matches(legacy_wait).count() == 1 && text.matches(legacy_boot).count() == 1;
+        let modern =
+            text.matches(modern_wait).count() == 1 && text.matches(modern_boot).count() == 1;
+        ensure!(legacy != modern, "stock init does not contain one recognized ADSP loader layout");
+        let (wait, boot) =
+            if legacy { (legacy_wait, legacy_boot) } else { (modern_wait, modern_boot) };
         text = text.replace(wait, "    exec_start skyward-firmware\n").replace(boot, "");
         // The recovery basename enters the UI directly. The same binary
         // under its CLI name accepts the early firmware subcommand.
@@ -401,6 +407,20 @@ mod tests {
         assert_eq!(rd.find("system/bin/skyward").unwrap().data, b"recovery");
         assert!(!rd.entries.iter().any(|e| e.name.ends_with(".sh")), "no device scripts are added");
         assert!(configure_init(&mut rd, &cfg).is_err(), "an unexpected init layout must fail rather than pack silently");
+    }
+
+    #[test]
+    fn remoteproc_replaces_the_modern_adsp_loader() {
+        let mut rd = Ramdisk { entries: Vec::new() };
+        let stock = b"# stock licence\non fs\n    mount_all /vendor/etc/charger_fstab.qti --early\n    wait /sys/kernel/boot_adsp/ssr\n    write /sys/kernel/boot_adsp/ssr 1\n    wait /sys/class/power_supply/battery\n";
+        rd.add("init.recovery.qcom.rc", 0o640, stock.to_vec()).unwrap();
+        let cfg = skyward_config::DeviceConfig::parse(include_str!("../../../devices/piano.toml")).unwrap();
+        configure_init(&mut rd, &cfg).unwrap();
+        let text = std::str::from_utf8(&rd.find("init.recovery.qcom.rc").unwrap().data).unwrap();
+        assert!(text.contains("    mount_all /vendor/etc/charger_fstab.qti --early\n"));
+        assert!(text.contains("    wait /sys/class/power_supply/battery\n"));
+        assert!(!text.contains("/sys/kernel/boot_adsp"));
+        assert!(text.contains("exec_start skyward-firmware"));
     }
 
     #[test]
