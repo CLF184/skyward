@@ -125,6 +125,25 @@ fn main() -> Result<()> {
                     cfg.device.codename
                 );
             }
+            if let Some(disk) = &cfg.disk {
+                ensure!(
+                    hex(&Sha256::digest(DISK_GDISK)) == DISK_GDISK_SHA256,
+                    "the bundled gdisk is not the tested binary"
+                );
+                ensure!(
+                    hex(&Sha256::digest(DISK_GDISK_UUID)) == DISK_GDISK_UUID_SHA256,
+                    "the bundled UUID library is not the tested library"
+                );
+                ensure!(hex(&Sha256::digest(DISK_DMCTL)) == DISK_DMCTL_SHA256, "the bundled dmctl is not the reference binary");
+                put(&mut rd, &disk.mass_storage.start_script, 0o755, include_bytes!("../../../resources/piano/piano-msc-start.sh"))?;
+                put(&mut rd, &disk.mass_storage.unmount_script, 0o755, include_bytes!("../../../resources/piano/piano-msc-unmount.sh"))?;
+                if let Some(script) = &disk.gpt.prepare_script {
+                    put(&mut rd, script, 0o755, include_bytes!("../../../resources/piano/piano-fixgpt-unmount.sh"))?;
+                }
+                put(&mut rd, &disk.gpt.gdisk, 0o755, DISK_GDISK)?;
+                put(&mut rd, &disk.gpt.dmctl, 0o755, DISK_DMCTL)?;
+                put(&mut rd, &disk.gpt.uuid_library, 0o644, DISK_GDISK_UUID)?;
+            }
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
             // among its programs, and its unzip there too, a link to ziptool
@@ -165,6 +184,9 @@ fn main() -> Result<()> {
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
             println!("version={}\npackage={}\nrecovery={}", stock.version, stock.package, stock.recovery);
+            for mirror in &stock.packages {
+                println!("mirror={mirror}");
+            }
             match out {
                 Some(out) => take_stock_recovery(&stock, &out),
                 None => Ok(()),
@@ -213,6 +235,28 @@ fn configure_init(rd: &mut Ramdisk, config: &skyward_config::DeviceConfig) -> Re
 /// The partition a recovery is made on, as a full update package names it.
 const RECOVERY: &str = "recovery";
 
+/// The tested ARM64 gdisk and the UUID library it needs, for a device whose
+/// configuration enables whole-disk maintenance.
+const DISK_GDISK: &[u8] = include_bytes!("../../../resources/piano/gdisk");
+const DISK_GDISK_UUID: &[u8] = include_bytes!("../../../resources/piano/libext2_uuid.so");
+const DISK_DMCTL: &[u8] = include_bytes!("../../../resources/piano/dmctl");
+const DISK_DMCTL_SHA256: &str = "c6fa26b4b199eb1ee1798cdf71d2c34659d4ca6ecfa7d2d3686637c2900454cb";
+const DISK_GDISK_SHA256: &str = "3ecffce384482b47fc76742f404a125c652a892f3f370603e9023eb06ee56751";
+const DISK_GDISK_UUID_SHA256: &str = "a0560f406c35679ce9c0c644b243dd9588f83e05f8dbed4128604c182b4b197f";
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Put a configured device resource in the ramdisk, replacing a stock file
+/// of the same path or adding it when there is none.
+fn put(rd: &mut Ramdisk, path: &str, mode: u32, data: &[u8]) -> Result<()> {
+    if rd.find(path).is_some() {
+        rd.replace(path, data.to_vec())
+    } else {
+        rd.add(path, mode, data.to_vec())
+    }
+}
+
 /// Take the recovery partition out of the stock build's full update package
 /// on its server, reading only what that partition takes of it, and write it
 /// to `out` once its SHA-256 is the one the configuration names.
@@ -221,7 +265,19 @@ fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> 
     std::fs::create_dir_all(parent).with_context(|| format!("make {}", parent.display()))?;
     // Taken out beside where it goes, so it is moved there whole.
     let work = tempfile::Builder::new().prefix(".stock").tempdir_in(parent).with_context(|| format!("make a folder in {}", parent.display()))?;
-    let payload = unpayload::Payload::open_url(&stock.package).with_context(|| format!("open {}", stock.package))?;
+    let mut opened = None;
+    let mut failures = Vec::new();
+    for source in stock.sources() {
+        eprintln!("opening {source}");
+        match unpayload::Payload::open_url(source) {
+            Ok(payload) => {
+                opened = Some((payload, source));
+                break;
+            }
+            Err(error) => failures.push(format!("{source}: {error:#}")),
+        }
+    }
+    let (payload, source) = opened.with_context(|| format!("open any stock package source:\n{}", failures.join("\n")))?;
     let options = unpayload::ExtractOptions { output_dir: work.path().to_path_buf(), partitions: vec![RECOVERY.into()], ..Default::default() };
     let report = |event: unpayload::Event<'_>| match event {
         unpayload::Event::Started { partitions } => {
@@ -232,10 +288,10 @@ fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> 
         unpayload::Event::Extracted(image) => println!("took {} out: {} bytes", image.partition, image.size),
         unpayload::Event::Progress { .. } => {}
     };
-    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {}", stock.package))?;
-    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{} holds no {RECOVERY} partition", stock.package))?;
+    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {source}"))?;
+    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{source} holds no {RECOVERY} partition"))?;
     let sum: String = image.sha256.as_deref().context("the package's own sum of the image was not checked")?.iter().map(|b| format!("{b:02x}")).collect();
-    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {} has the SHA-256 {sum}, where the configuration names {}", stock.package, stock.recovery);
+    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {source} has the SHA-256 {sum}, where the configuration names {}", stock.recovery);
     std::fs::rename(&image.path, out).with_context(|| format!("move {} to {}", image.path.display(), out.display()))?;
     println!("wrote {} ({} bytes), its SHA-256 the one the configuration names", out.display(), image.size);
     Ok(())

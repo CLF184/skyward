@@ -1,4 +1,5 @@
 use crate::backup;
+use crate::advanced;
 use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
@@ -996,8 +997,22 @@ fn install_options(app: &App) -> Options {
 /// How often the WLAN page scans while it shows.
 const SCAN_EVERY: Duration = Duration::from_secs(10);
 
-fn wlan_worker(w: &Option<wlan::Worker>) -> Result<&wlan::Worker> {
-    w.as_ref().context("the phone's WLAN is not brought up")
+fn wlan_stopped(l: skyward_ui::Lang) -> &'static str {
+    l.pick([
+        "磁盘操作已停止 WLAN，请重启 recovery 后再使用",
+        "磁碟操作已停止 WLAN，請重新啟動 recovery 後再使用",
+        "A disk operation stopped Wi-Fi. Restart recovery to use it again",
+    ])
+}
+
+fn send_wlan(app: &mut App, worker: &Option<wlan::Worker>, command: wlan::Command, now: u64) {
+    match worker {
+        Some(worker) => worker.send(command),
+        None => {
+            let why = wlan_stopped(app.state.lang);
+            app.wlan_unavailable(why, now);
+        }
+    }
 }
 
 /// Resolve the installed system's libraries only after its partitions are
@@ -1114,6 +1129,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     };
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.set_screen_corners(cfg.display.corner_radius as f32);
+    app.set_advanced_tools(cfg.disk.is_some());
     // The settings kept from the starts before are back before the first
     // frame, and before file transfer starts with its switch and the time
     // zone. The pages speak the language chosen then, or else the one the
@@ -1266,6 +1282,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Work on whole partitions under way, and whether the system asked for
     // it before the recovery started.
     let mut part_worker: Option<partwork::Worker> = None;
+    let mut gpt_worker: Option<advanced::GptWorker> = None;
     match &request.work {
         Work::WipeData { reformat } => {
             eraser = Some(factory_reset(&mut app, request.keep_memtag_mode, true, reformat.clone())?);
@@ -1346,6 +1363,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         Work::Menu | Work::Exit | Work::Fastboot | Work::PromptWipeData | Work::Unsupported(_) => {}
     }
+    // The settings can ask for the data partition to open as a normal
+    // recovery start comes up, without taking the pages to Decrypt. This is
+    // the same opening the Decrypt page starts.
+    if decryptor.is_none() && app.state.auto_decrypt && !fastboot && matches!(&request.work, Work::Menu | Work::Exit) {
+        skyward_sys::kmsg("opening the data partition automatically, as the settings ask")?;
+        app.state.data = Data::Opening;
+        app.refresh();
+        decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
+    }
     // A switch asked for finishes one cut off before itself; fastboot leaves
     // /metadata to fastbootd until the recovery's pages come up.
     if let (Some(worker), false, false) = (systems_worker.as_mut(), switch_asked, fastboot) {
@@ -1399,6 +1425,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Asking GitHub for Skyward's newest release, and updating to it.
     let mut skyward_checker: Option<updates::Worker> = None;
     let mut skyward_updater: Option<updates::Worker> = None;
+    // Asking GitHub for release resources, and downloading the one chosen.
+    let mut resource_checker: Option<updates::Worker> = None;
+    let mut resource_downloader: Option<updates::Worker> = None;
     // The phone sleeps while its screen is off and nothing needs it awake.
     let sleeper = Sleeper::start()?;
     // A uevent may be a charger or a computer attached or taken away: the
@@ -1593,10 +1622,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || merger.is_some()
             || decryptor.is_some()
             || part_worker.is_some()
+            || gpt_worker.is_some()
             || checker.is_some()
             || downloader.is_some()
             || skyward_checker.is_some()
             || skyward_updater.is_some()
+            || resource_checker.is_some()
+            || resource_downloader.is_some()
             || systems_busy;
         let joining = app.state.wlan.as_ref().and_then(|w| w.joined.as_ref()).is_some_and(|j| matches!(j.stage, Joining::Joining | Joining::Addressing));
         let running = match &shell {
@@ -1658,6 +1690,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(u) = &skyward_updater {
             fds.push(u.fd());
+        }
+        if let Some(c) = &resource_checker {
+            fds.push(c.fd());
+        }
+        if let Some(d) = &resource_downloader {
+            fds.push(d.fd());
         }
         if let Some(s) = &systems_worker {
             fds.push(s.fd());
@@ -1824,6 +1862,27 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             filework::End::Stopped => JobEnd::Stopped,
             filework::End::Failed(why) => JobEnd::Failed(why),
         };
+        if let Some(result) = gpt_worker.as_ref().and_then(advanced::GptWorker::done) {
+            gpt_worker = None;
+            match result {
+                Ok(disks) => {
+                    let count = disks.len();
+                    let message = match app.state.lang {
+                        Lang::Hans => format!("已修复 {count} 个 GPT。请重启 recovery 后再挂载分区。"),
+                        Lang::Hant => format!("已修復 {count} 個 GPT。請重新啟動 recovery 後再掛載分割區。"),
+                        Lang::En => format!("Repaired {count} GPTs. Restart recovery before mounting partitions."),
+                    };
+                    app.report(&message, now);
+                    app.disk_maintenance_ended(Ok(message));
+                }
+                Err(e) => {
+                    skyward_sys::kmsg(&format!("GPT repair failed: {e}"))?;
+                    let why = format!("{}: {e}", app.state.lang.pick(["修复 GPT 失败", "修復 GPT 失敗", "GPT repair failed"]));
+                    app.report(&why, now);
+                    app.disk_maintenance_ended(Err(why));
+                }
+            }
+        }
         let mut worked = false;
         if let Some(w) = &worker {
             for ev in w.events() {
@@ -2001,7 +2060,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         let wlan_on = app.state.wlan.as_ref().is_some_and(|w| w.power == WlanPower::On);
         if app.screen() == Screen::Wlan && wlan_on && scanned_at.elapsed() >= SCAN_EVERY {
             scanned_at = Instant::now();
-            wlan_worker(&wlan)?.send(wlan::Command::Scan);
+            send_wlan(&mut app, &wlan, wlan::Command::Scan, now);
         }
         // Settings changed go into their file a moment after the last
         // change, while nothing else has /metadata: not in fastboot, whose
@@ -2013,6 +2072,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || eraser.is_some()
             || backuper.is_some()
             || part_worker.is_some()
+            || gpt_worker.is_some()
             || systems_worker.as_ref().is_some_and(systems::Worker::busy);
         if !metadata_busy {
             if let Some(due) = keeper.due(app.settings(), now) {
@@ -2062,7 +2122,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.download_ended(end, have(&app, &release), now);
                         fetched = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::Writing { .. } => {
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::ResourcesChecked(_) | updates::Event::Writing { .. } => {
                         unreachable!("a download asks nothing of its own, and writes nothing")
                     }
                 }
@@ -2082,6 +2142,45 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if asked {
             skyward_checker = None;
+        }
+        let mut resources_asked = false;
+        if let Some(c) = &resource_checker {
+            for ev in c.events() {
+                let updates::Event::ResourcesChecked(answer) = ev else { unreachable!("asking GitHub downloads nothing") };
+                skyward_sys::kmsg(&format!("GitHub told of the release resources: {answer:?}"))?;
+                app.resources_checked(answer);
+                resources_asked = true;
+            }
+        }
+        if resources_asked {
+            resource_checker = None;
+        }
+        let mut resource_downloaded = false;
+        if let Some(d) = &resource_downloader {
+            for ev in d.events() {
+                match ev {
+                    updates::Event::Progress(progress, rate) => app.resource_progress(progress, rate),
+                    updates::Event::Ended(end) => {
+                        let end = match end {
+                            updates::End::Downloaded => DownloadEnd::Downloaded,
+                            updates::End::Stopped => DownloadEnd::Stopped,
+                            updates::End::Failed(why) => DownloadEnd::Failed(why),
+                            updates::End::Updated(_) | updates::End::NotWritten(_) | updates::End::WriteFailed(..) => {
+                                unreachable!("a release resource is only downloaded")
+                            }
+                        };
+                        skyward_sys::kmsg(&format!("downloading a release resource ended: {end:?}"))?;
+                        app.resource_ended(end, now);
+                        resource_downloaded = true;
+                    }
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::ResourcesChecked(_) | updates::Event::Writing { .. } => {
+                        unreachable!("a resource download asks nothing of its own, and writes nothing")
+                    }
+                }
+            }
+        }
+        if resource_downloaded {
+            resource_downloader = None;
         }
         let mut updated = false;
         if let Some(u) = &skyward_updater {
@@ -2104,7 +2203,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.skyward_ended(end, now);
                         updated = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) => {
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::ResourcesChecked(_) => {
                         unreachable!("an update asks nothing of its own")
                     }
                 }
@@ -2461,6 +2560,98 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     Effect::StopRelabel => relabeler.as_ref().context("there is no relabeling to stop")?.stop(),
                     // Partitions that cannot be read are the page's to say.
                     Effect::ReadFilesystems => app.set_filesystems(read_filesystems().map_err(|e| format!("{e:#}"))),
+                    Effect::EnableMassStorage => {
+                        ensure!(
+                            decryptor.is_none()
+                                && eraser.is_none()
+                                && installer.is_none()
+                                && backuper.is_none()
+                                && part_worker.is_none()
+                                && gpt_worker.is_none()
+                                && worker.is_none(),
+                            "other work is under way"
+                        );
+                        if let Some(t) = transfer.take() {
+                            if let Err(e) = t.stop(false) {
+                                let why = format!("USB file transfer did not stop: {e:#}");
+                                app.report(&why, now);
+                                app.disk_maintenance_ended(Err(why));
+                                continue;
+                            }
+                        }
+                        let why = wlan_stopped(app.state.lang);
+                        wlan = None;
+                        app.wlan_unavailable(why, now);
+                        app.report(
+                            app.state.lang.pick([
+                                "正在释放磁盘并开启大容量存储…",
+                                "正在釋放磁碟並開啟大容量儲存…",
+                                "Releasing the disk and enabling mass storage…",
+                            ]),
+                            now,
+                        );
+                        match advanced::enable_mass_storage(cfg, info.slot) {
+                            Ok(()) => {
+                                let message = app.state.lang.pick([
+                                    "大容量存储已开启。请安全弹出后重启 recovery。",
+                                    "大容量儲存已開啟。請安全退出後重新啟動 recovery。",
+                                    "Mass storage is on. Eject safely, then restart recovery.",
+                                ]).to_string();
+                                app.report(&message, now);
+                                app.disk_maintenance_ended(Ok(message));
+                            }
+                            Err(e) => {
+                                skyward_sys::kmsg(&format!("mass storage failed: {e:#}"))?;
+                                let why = format!(
+                                    "{}: {e:#}",
+                                    app.state.lang.pick(["无法开启大容量存储", "無法開啟大容量儲存", "Mass storage failed"])
+                                );
+                                app.report(&why, now);
+                                app.disk_maintenance_ended(Err(why));
+                            }
+                        }
+                    }
+                    Effect::RepairGpt => {
+                        ensure!(
+                            decryptor.is_none()
+                                && eraser.is_none()
+                                && installer.is_none()
+                                && backuper.is_none()
+                                && part_worker.is_none()
+                                && worker.is_none(),
+                            "other work is under way"
+                        );
+                        if let Err(e) = advanced::check_gpt(cfg) {
+                            let why = format!("{e:#}");
+                            app.report(&why, now);
+                            app.disk_maintenance_ended(Err(why));
+                            continue;
+                        }
+                        if let Some(t) = transfer.take() {
+                            if let Err(e) = t.stop(false) {
+                                let why = format!("USB file transfer did not stop: {e:#}");
+                                app.report(&why, now);
+                                app.disk_maintenance_ended(Err(why));
+                                continue;
+                            }
+                        }
+                        let why = wlan_stopped(app.state.lang);
+                        wlan = None;
+                        app.wlan_unavailable(why, now);
+                        app.report(
+                            app.state.lang.pick(["正在修复 GPT…", "正在修復 GPT…", "Repairing GPT…"]),
+                            now,
+                        );
+                        match advanced::GptWorker::start(cfg.clone(), info.slot) {
+                            Ok(worker) => gpt_worker = Some(worker),
+                            Err(e) => {
+                                let why = format!("{e:#}");
+                                skyward_sys::kmsg(&format!("GPT repair did not start: {why}"))?;
+                                app.report(&why, now);
+                                app.disk_maintenance_ended(Err(why));
+                            }
+                        }
+                    }
                     // The data partition made afresh as another filesystem
                     // is a factory reset, as the system asks for one; the
                     // rest is work on one partition. Opening the data
@@ -2564,15 +2755,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         skyward_sys::kmsg("merging the update, as the update page asked")?;
                         merger = Some(merge::Merger::start(slot, true)?);
                     }
-                    Effect::Wlan(on) => wlan_worker(&wlan)?.send(if on { wlan::Command::On } else { wlan::Command::Off }),
+                    Effect::Wlan(on) => {
+                        send_wlan(&mut app, &wlan, if on { wlan::Command::On } else { wlan::Command::Off }, now);
+                    }
                     Effect::ScanWlan => {
                         scanned_at = Instant::now();
-                        wlan_worker(&wlan)?.send(wlan::Command::Scan);
+                        send_wlan(&mut app, &wlan, wlan::Command::Scan, now);
                     }
                     Effect::JoinWlan { ssid, name, security, password } => {
-                        wlan_worker(&wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
+                        send_wlan(&mut app, &wlan, wlan::Command::Join { ssid, name, security, password: password.0 }, now);
                     }
-                    Effect::LeaveWlan => wlan_worker(&wlan)?.send(wlan::Command::Leave),
+                    Effect::LeaveWlan => send_wlan(&mut app, &wlan, wlan::Command::Leave, now),
                     // What the installed system is called is the page's to
                     // report when it cannot be read.
                     Effect::CheckUpdate => {
@@ -2605,6 +2798,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let task = updates::Task::CheckSkyward { probe, codename: cfg.device.codename.clone() };
                         skyward_checker = Some(updates::Worker::start(task, servers.clone())?);
                     }
+                    Effect::CheckResources => {
+                        ensure!(resource_checker.is_none(), "GitHub is being asked already");
+                        let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
+                        let task = updates::Task::CheckResources { probe, address: app.state.github_address() };
+                        resource_checker = Some(updates::Worker::start(task, servers.clone())?);
+                    }
+                    Effect::DownloadResource { build, path } => {
+                        ensure!(resource_downloader.is_none(), "a resource is being downloaded already");
+                        ensure!(installer.is_none(), "an installer is running already");
+                        let path = PathBuf::from(path);
+                        let folder = path.parent().context("the resource has no folder")?;
+                        fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
+                        skyward_sys::kmsg(&format!("downloading release resource {}", build.name))?;
+                        let task = updates::Task::DownloadResource { build, address: app.state.github_address(), path };
+                        resource_downloader = Some(updates::Worker::start(task, servers.clone())?);
+                    }
+                    Effect::StopResource => resource_downloader.as_ref().context("no resource is being downloaded")?.stop(),
                     // The zip goes into the recovery's own folder, which is
                     // in memory, before its image goes into the recovery
                     // partitions.
@@ -2613,7 +2823,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         ensure!(installer.is_none(), "an installer is running already");
                         skyward_sys::kmsg(&format!("updating Skyward to {}", build.name))?;
                         let path = Path::new(skyward_sys::RUN).join(&build.name);
-                        let task = updates::Task::UpdateSkyward { build, codename: cfg.device.codename.clone(), path };
+                        let task = updates::Task::UpdateSkyward {
+                            build,
+                            address: app.state.github_address(),
+                            codename: cfg.device.codename.clone(),
+                            path,
+                        };
                         skyward_updater = Some(updates::Worker::start(task, servers.clone())?);
                     }
                     Effect::StopSkywardUpdate => skyward_updater.as_ref().context("Skyward is not being updated")?.stop(),

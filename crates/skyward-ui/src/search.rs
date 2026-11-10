@@ -66,6 +66,12 @@ pub const ENTRIES: &[Entry] = &[
     ),
     entry(["导出日志", "匯出記錄", "Export logs"], ADVANCED, Screen::Logs, &["daochurizhi", "dcrz", "rizhi", "rz", "logs", "dmesg"]),
     entry(
+        ["资源下载", "資源下載", "Resource downloads"],
+        ADVANCED,
+        Screen::Resources,
+        &["resourcerelease", "resources", "ziyuan", "zy", "apk", "zip", "img", "magisk", "root", "资源", "資源"],
+    ),
+    entry(
         ["系统更新", "系統更新", "System update"],
         ADVANCED,
         Screen::Update,
@@ -78,8 +84,20 @@ pub const ENTRIES: &[Entry] = &[
     vibration(entry(["振动强度", "震動強度", "Vibration intensity"], SETTINGS, Screen::Settings, &["zhendongqiangdu", "zdqd", "qiangdu", "qd", "intensity", "strength"])),
     vibration(entry(["触摸振动", "觸控震動", "Touch vibration"], SETTINGS, Screen::Settings, &["chumozhendong", "cmzd", "zhendong", "vibrate", "haptic"])),
     entry(["文件传输", "檔案傳輸", "File transfer"], SETTINGS, Screen::Settings, &["wenjianchuanshu", "wjcs", "chuanshu", "mtp", "usb"]),
+    entry(
+        ["自动解密 data", "自動解密 data", "Auto-decrypt data"],
+        SETTINGS,
+        Screen::Settings,
+        &["zidongjiemi", "zdjm", "jiemi", "decrypt", "data", "metadata"],
+    ),
     entry(["语言", "語言", "Language"], SETTINGS, Screen::Language, &["yuyan", "yy", "language", "fanti", "jianti", "english"]),
     entry(["时区", "時區", "Time zone"], SETTINGS, Screen::TimeZone, &["shiqu", "sq", "timezone"]),
+    entry(
+        ["GitHub 地址", "GitHub 位址", "GitHub address"],
+        SETTINGS,
+        Screen::GitHub,
+        &["github", "dizhi", "dz", "mirror", "jingxiang", "jiasu"],
+    ),
     entry(["重启", "重新啟動", "Reboot"], HOME, Screen::Reboot, &["chongqi", "cq", "reboot", "fastboot", "bootloader", "edl", "guanji"]),
     entry(["启动槽位", "啟動槽位", "Boot slot"], ["重启", "重新啟動", "Reboot"], Screen::Slot, &["qidongcaowei", "qdcw", "caowei", "cw", "slot"]),
     entry(["关于本机", "關於手機", "About phone"], SETTINGS, Screen::About, &["guanyubenji", "gybj", "about", "banben", "version"]),
@@ -213,6 +231,13 @@ mod tests {
         assert_eq!(titles("skyward"), ["Skyward 更新"]);
         assert_eq!(titles("gengxin"), ["系统更新", "Skyward 更新"]);
         assert!(find_on("skyward", Lang::Hans, |s| s != Screen::SkywardUpdate).is_empty());
+    }
+
+    #[test]
+    fn release_resources_are_found_on_the_advanced_page() {
+        assert_eq!(titles("resources"), ["资源下载"]);
+        assert_eq!(titles("magisk"), ["资源下载"]);
+        assert!(find_on("resources", Lang::Hans, |s| s != Screen::Resources).is_empty());
     }
 
     #[test]

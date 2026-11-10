@@ -62,6 +62,9 @@ pub struct DeviceConfig {
     /// recovery leaves it out of their reach.
     #[serde(default)]
     pub firmware: Option<FirmwarePartition>,
+    /// Whole-disk maintenance offered in Advanced.
+    #[serde(default)]
+    pub disk: Option<Disk>,
     #[serde(default, rename = "service")]
     pub services: Vec<Service>,
     /// The vibration motor's click, on phones that have one.
@@ -99,10 +102,20 @@ pub struct DeviceConfig {
 pub struct Stock {
     /// The build's version, such as OS4.0.4.0.XPACNXM.
     pub version: String,
-    /// Where the package is downloaded from, over HTTPS.
+    /// The first place the package is downloaded from, over HTTPS.
     pub package: String,
+    /// Other places to try in order when an earlier one cannot be opened.
+    #[serde(default)]
+    pub packages: Vec<String>,
     /// The recovery partition's SHA-256, in lowercase hex.
     pub recovery: String,
+}
+
+impl Stock {
+    /// Every place the package can be downloaded from, in the order to try.
+    pub fn sources(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.package.as_str()).chain(self.packages.iter().map(String::as_str))
+    }
 }
 
 /// What brings the phone's WLAN up inside a recovery, which loads none of
@@ -196,6 +209,44 @@ pub struct FirmwarePartition {
     /// the older boot_adsp loader.
     #[serde(default)]
     pub remoteproc: Option<String>,
+}
+
+/// Whole-disk maintenance: exporting the phone's main disk to a computer,
+/// and repairing GPT on the disks listed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Disk {
+    /// The whole disk mass storage exports, such as `/dev/block/sda`.
+    pub device: String,
+    /// USB gadget folder whose mass-storage function is configured.
+    pub gadget: String,
+    pub mass_storage: MassStorage,
+    pub gpt: Gpt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MassStorage {
+    /// Script that configures the USB gadget.
+    pub start_script: String,
+    /// Script that unmounts what the disk still backs.
+    pub unmount_script: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Gpt {
+    /// Disks under `/dev/block` whose GPT tables are repaired.
+    pub disks: Vec<String>,
+    /// Optional script run after mounts are released and before gdisk.
+    #[serde(default)]
+    pub prepare_script: Option<String>,
+    /// gdisk and the device-mapper control program.
+    pub gdisk: String,
+    pub dmctl: String,
+    /// The UUID library gdisk loads.
+    pub uuid_library: String,
+    /// Input sent to gdisk for the tested repair sequence.
+    pub input: String,
+    /// Text gdisk prints when the repair completed.
+    pub success: String,
 }
 
 /// A file a driver asks the firmware loader for, and where it is.
@@ -677,6 +728,28 @@ impl DeviceConfig {
                 "[haptics] strength: {lightest} and {strongest} are not shares rising from above 0 to at most 1"
             );
         }
+        if let Some(disk) = &cfg.disk {
+            for path in [&disk.device, &disk.gadget] {
+                ensure!(Path::new(path).is_absolute(), "[disk] {path} is not an absolute path");
+            }
+            for path in [
+                &disk.mass_storage.start_script,
+                &disk.mass_storage.unmount_script,
+                &disk.gpt.gdisk,
+                &disk.gpt.dmctl,
+                &disk.gpt.uuid_library,
+            ]
+            .into_iter()
+            .chain(disk.gpt.prepare_script.iter())
+            {
+                ensure!(Path::new(path).is_absolute(), "[disk] {path} is not an absolute path");
+            }
+            ensure!(!disk.gpt.disks.is_empty(), "[disk.gpt] disks must not be empty");
+            for name in &disk.gpt.disks {
+                ensure!(!name.is_empty() && !name.contains('/'), "[disk.gpt] {name:?} is not a disk name");
+            }
+            ensure!(!disk.gpt.input.is_empty() && !disk.gpt.success.is_empty(), "[disk.gpt] input and success must not be empty");
+        }
         if let Some(logd) = &cfg.logd {
             for library in &logd.libraries {
                 let path = Path::new(library);
@@ -697,14 +770,15 @@ impl DeviceConfig {
             }
         }
         if let Some(stock) = &cfg.stock {
-            let name = stock.package.rsplit('/').next().unwrap_or_default();
             ensure!(!stock.version.is_empty(), "[stock] version must not be empty");
-            ensure!(
-                stock.package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version),
-                "[stock] package: {} is not an HTTPS address of the full package of {}",
-                stock.package,
-                stock.version
-            );
+            for package in stock.sources() {
+                let name = package.rsplit('/').next().unwrap_or_default();
+                ensure!(
+                    package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version),
+                    "[stock] package: {package} is not an HTTPS address of the full package of {}",
+                    stock.version
+                );
+            }
             ensure!(
                 stock.recovery.len() == 64 && stock.recovery.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 "[stock] recovery: {} is not a SHA-256 in lowercase hex",
@@ -1049,8 +1123,32 @@ mod tests {
     }
 
     #[test]
+    fn piano_follows_the_shared_soc_configuration() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/piano.toml")).unwrap();
+        assert_eq!(cfg.modules.load, ["nt36532_touch"]);
+        assert_eq!(cfg.firmware, None);
+        assert!(cfg.partitions.mounted.is_empty());
+        assert!(cfg.logd.is_none());
+        assert!(cfg.backup.efs.is_empty());
+        assert!(cfg.wipe.logs.is_empty());
+        assert_eq!(cfg.services.len(), 2);
+        let touch = cfg.services.iter().find(|s| s.path == "/odm/bin/touch_report_debug").expect("stock touch reporting");
+        assert_eq!(touch.groups, ["root", "input", "system"]);
+        let post_boot = cfg.services.iter().find(|s| s.path == "/vendor/bin/sh").expect("stock post-boot service");
+        assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
+        let wlan = cfg.wlan.expect("WLAN");
+        assert_eq!(wlan.modules, ["rfkill", "qca_cld3_peach_v2"]);
+        assert_eq!(wlan.firmware.len(), 2);
+        let disk = cfg.disk.expect("whole-disk tools");
+        assert_eq!(disk.device, "/dev/block/sda");
+        assert_eq!(disk.gpt.disks, ["sda", "sdb", "sdc", "sdd", "sde", "sdf"]);
+        assert!(cfg.services.iter().all(|s| !s.path.starts_with("/piano")), "{:?}", cfg.services.iter().map(|s| &s.path).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn a_stock_build_is_a_full_package_over_https_and_a_sha_256() {
-        let ok = "[device]\ncodename = \"x\"\n[stock]\nversion = \"OS1.0.1.0.XXXCNXM\"\npackage = \"https://d.example/OS1.0.1.0.XXXCNXM/x-ota_full-OS1.0.1.0.XXXCNXM-user-16.0-0123456789.zip\"\n";
+        let package = "https://d.example/OS1.0.1.0.XXXCNXM/x-ota_full-OS1.0.1.0.XXXCNXM-user-16.0-0123456789.zip";
+        let ok = format!("[device]\ncodename = \"x\"\n[stock]\nversion = \"OS1.0.1.0.XXXCNXM\"\npackage = \"{package}\"\n");
         let hash = "faa425b10231a0cfe2d74ff34f344f032ee2d891ea5e9420bf4e67cd86d622a7";
         assert!(DeviceConfig::parse(&format!("{ok}recovery = \"{hash}\"\n")).is_ok());
         assert!(DeviceConfig::parse(&format!("{ok}recovery = \"{}\"\n", hash.to_uppercase())).is_err(), "in lowercase");
@@ -1059,6 +1157,10 @@ mod tests {
         assert!(DeviceConfig::parse(&format!("{plain}recovery = \"{hash}\"\n")).is_err(), "over plain HTTP");
         let other = ok.replace("version = \"OS1.0.1.0", "version = \"OS1.0.2.0");
         assert!(DeviceConfig::parse(&format!("{other}recovery = \"{hash}\"\n")).is_err(), "the package of another build");
+        let mirror = package.replace("d.example", "m.example");
+        let mirrors = format!("{ok}packages = [\"{mirror}\"]\nrecovery = \"{hash}\"\n");
+        let stock = DeviceConfig::parse(&mirrors).unwrap().stock.unwrap();
+        assert_eq!(stock.sources().collect::<Vec<_>>(), [package, mirror.as_str()]);
         assert_eq!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().stock, None);
     }
 

@@ -1,0 +1,88 @@
+[device]
+codename = "piano"
+brand = "Xiaomi"
+model = "Xiaomi Pad 8 Pro"
+tablet = true
+supports_vibration = false
+ab = true
+soc = { hans = "骁龙®8至尊版移动平台", hant = "Snapdragon® 8 Elite 行動平台", en = "Snapdragon® 8 Elite Mobile Platform" }
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+width = 3200
+height = 2136
+density = 440
+diagonal = 11.2
+corner_radius = 55
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
+load = ["nt36532_touch"]
+
+[touch]
+swap_xy = true
+flip_y = true
+ignored_devices = ["NVTCapacitivePenP81c", "NVTCapacitivePenM80p"]
+
+[disk]
+device = "/dev/block/sda"
+gadget = "/config/usb_gadget/g1"
+
+[disk.mass_storage]
+start_script = "/piano/bin/piano-msc-start.sh"
+unmount_script = "/piano/bin/piano-msc-unmount.sh"
+
+[disk.gpt]
+disks = ["sda", "sdb", "sdc", "sdd", "sde", "sdf"]
+prepare_script = "/piano/bin/piano-fixgpt-unmount.sh"
+gdisk = "/system/bin/gdisk"
+dmctl = "/system/bin/dmctl"
+uuid_library = "/system/lib64/libext2_uuid.so"
+input = "x\nj\n\nk\n\nw\nY\n"
+success = "The operation has completed successfully."
+
+# What the phone's own init runs once the system has finished starting.
+[[service]]
+path = "/vendor/bin/sh"
+args = ["/vendor/bin/init.kernel.post_boot.sh"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+user = "root"
+groups = ["root", "system", "wakelock", "graphics"]
+
+# The panel hands raw frames to the stock touch stack.
+[[service]]
+path = "/odm/bin/touch_report_debug"
+libraries = ["/odm/lib64", "/vendor/lib64", "/system/lib64"]
+user = "root"
+groups = ["root", "input", "system"]
+capabilities = ["SYS_NICE"]
+
+[wlan]
+modules = ["rfkill", "qca_cld3_peach_v2"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+firmware = [
+    { name = "wlan/qca_cld/peach_v2/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/peach_v2/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/qca_cld/peach_v2/wlan_mac.bin", partition = "persist", path = "wlan/wlan_mac.bin" },
+]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+# HyperOS 4 China full package, checked against Xiaomi's official update
+# server on 2026-11-10.
+[stock]
+version = "OS4.0.5.0.XPYCNXM"
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.5.0.XPYCNXM/piano-ota_full-OS4.0.5.0.XPYCNXM-user-17.0-86f6af9e1b.zip"
+packages = [
+    "https://bigota.d.miui.com/OS4.0.5.0.XPYCNXM/piano-ota_full-OS4.0.5.0.XPYCNXM-user-17.0-86f6af9e1b.zip",
+    "https://bn.d.miui.com/OS4.0.5.0.XPYCNXM/piano-ota_full-OS4.0.5.0.XPYCNXM-user-17.0-86f6af9e1b.zip",
+    "https://cdnorg.d.miui.com/OS4.0.5.0.XPYCNXM/piano-ota_full-OS4.0.5.0.XPYCNXM-user-17.0-86f6af9e1b.zip",
+    "https://hugeota.d.miui.com/OS4.0.5.0.XPYCNXM/piano-ota_full-OS4.0.5.0.XPYCNXM-user-17.0-86f6af9e1b.zip",
+]
+recovery = "56d144b7b41ec2b5832dc5b10927d9545398cfcc30e85684531665db968ca095"

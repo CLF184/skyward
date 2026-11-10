@@ -46,7 +46,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - name: Build the recovery service for the phone
-        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            export SKYWARD_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
       # It runs as a second system's first program, before any library is
       # there to load.
       - name: Build the second system's first program, static
@@ -82,7 +86,7 @@ jobs:
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
           else
-            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+            echo 'devices=["piano"]' >> "$GITHUB_OUTPUT"
           fi
 
   recovery:
@@ -150,7 +154,7 @@ jobs:
   release:
     name: Publish the release
     if: github.ref_type == 'tag'
-    needs: [check, recovery]
+    needs: [check, devices, recovery]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -175,10 +179,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          DEVICES: ${{ needs.devices.outputs.devices }}
         run: |
           zips=()
-          for config in devices/*.toml; do
-            device=$(basename "$config" .toml)
+          for device in $(jq -r '.[]' <<< "$DEVICES"); do
+            config="devices/$device.toml"
             model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["device"]["model"])' "$config")
             zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
             zips+=("$zip#$model ($device)")

@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use skyward_install::upgrade;
 use skyward_net::download::{self, Damaged, Failure, NoRoom, Progress, Refused, Sum};
-use skyward_net::github::{self, Build, Newest};
+use skyward_net::github::{self, Address, Build, Newest};
 use skyward_net::http::{self, Servers};
 use skyward_net::reach::{self, Reach};
 use skyward_net::release::{self, Installed, Release, Unanswered};
@@ -47,13 +47,19 @@ pub enum Task {
     /// phone `codename` names, and write the image into the recovery
     /// partitions of the slot that starts next and of any other slot that
     /// holds Skyward.
-    UpdateSkyward { build: Build, codename: String, path: PathBuf },
+    UpdateSkyward { build: Build, address: Address, codename: String, path: PathBuf },
+    /// Ask GitHub for the files in Skyward's shared resource release.
+    CheckResources { probe: String, address: Address },
+    /// Download the resource `build` to `path`.
+    DownloadResource { build: Build, address: Address, path: PathBuf },
 }
 
 pub enum Event {
     Checked(Result<Option<Release>, Unanswered>),
     /// What GitHub answered of Skyward's newest release.
     SkywardChecked(Result<Newest, Unanswered>),
+    /// The files GitHub gives in Skyward's shared resource release.
+    ResourcesChecked(Result<Vec<Build>, Unanswered>),
     /// How far the download has come, and how fast it goes, in bytes a
     /// second.
     Progress(Progress, u64),
@@ -158,22 +164,20 @@ impl Worker {
                     // of the file itself, which it gives again once one has
                     // run out and is turned down; the release's link on
                     // github.com is tried after it.
-                    Task::UpdateSkyward { build, codename, path } => {
+                    Task::UpdateSkyward { build, address, codename, path } => {
                         let a = http::agent(servers.clone());
                         *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
-                        let located = github::locate(&a, &build.url, skyward_info::VERSION)
-                            .inspect_err(|e| {
-                                let _ = skyward_sys::kmsg(&format!("asking GitHub where {} is: {e:#}", build.name));
-                            })
-                            .ok();
+                        let located = (address == Address::GitHub)
+                            .then(|| github::locate(&a, &build.url, skyward_info::VERSION))
+                            .and_then(Result::ok);
                         let mut located_again = false;
                         let mut refused = |a: &ureq::Agent| {
-                            if located_again {
+                            if address != Address::GitHub || located_again {
                                 return Again::Retry;
                             }
                             located_again = true;
                             match github::locate(a, &build.url, skyward_info::VERSION) {
-                                Ok(fresh) => Again::From(build.sources(Some(fresh))),
+                                Ok(fresh) => Again::From(build.sources(Some(fresh), address)),
                                 Err(e) => {
                                     let _ = skyward_sys::kmsg(&format!("asking GitHub again where {} is: {e:#}", build.name));
                                     Again::Retry
@@ -181,7 +185,7 @@ impl Worker {
                             }
                         };
                         let sum = Sum::Sha256(build.sha256.clone());
-                        let end = match fetch(&servers, build.sources(located), &sum, &build.name, &path, &stopping, &using, &tell, &mut refused) {
+                        let end = match fetch(&servers, build.sources(located, address), &sum, &build.name, &path, &stopping, &using, &tell, &mut refused) {
                             // Stopping asked for as the last of it came is
                             // stopping still: nothing is written.
                             End::Downloaded if stopping.load(Ordering::Relaxed) => End::Stopped,
@@ -196,6 +200,37 @@ impl Worker {
                             }
                             _ => {}
                         }
+                        tell(Event::Ended(end));
+                    }
+                    Task::CheckResources { probe, address } => {
+                        let a = http::agent(servers.clone());
+                        *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
+                        let answer =
+                            github::ask_resources(&a, address, skyward_info::VERSION).map_err(|e| unanswered(&e, github::RESOURCE, &probe, &servers));
+                        tell(Event::ResourcesChecked(answer));
+                    }
+                    Task::DownloadResource { build, address, path } => {
+                        let a = http::agent(servers.clone());
+                        *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
+                        let located = (address == Address::GitHub)
+                            .then(|| github::locate(&a, &build.url, skyward_info::VERSION))
+                            .and_then(Result::ok);
+                        let mut located_again = false;
+                        let mut refused = |a: &ureq::Agent| {
+                            if address != Address::GitHub || located_again {
+                                return Again::Retry;
+                            }
+                            located_again = true;
+                            match github::locate(a, &build.url, skyward_info::VERSION) {
+                                Ok(fresh) => Again::From(build.sources(Some(fresh), address)),
+                                Err(e) => {
+                                    let _ = skyward_sys::kmsg(&format!("asking GitHub again where {} is: {e:#}", build.name));
+                                    Again::Retry
+                                }
+                            }
+                        };
+                        let sum = Sum::Sha256(build.sha256.clone());
+                        let end = fetch(&servers, build.sources(located, address), &sum, &build.name, &path, &stopping, &using, &tell, &mut refused);
                         tell(Event::Ended(end));
                     }
                 }

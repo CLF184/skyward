@@ -1,9 +1,11 @@
 use crate::app::{
-    Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
-    SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
-    BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
-    USB_DRIVE_WANTED, WIPES, installs, starting,
+    Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, DiskMaintenance, DiskTool, Dock, DownloadEnd,
+    EraseStop, Field, FileKind,
+    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, ResourcesCheck,
+    Rows, Screen, SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe,
+    ADDABLE,
+    BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, GITHUB_ADDRESSES, SCREEN_OFF, TARGETS, TIME_ZONES,
+    USB_DRIVE_UNREADABLE, USB_DRIVE_WANTED, WIPES, installs, starting,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -80,6 +82,8 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::RestoreBackup => restore_backup(cx),
         Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
+        Screen::DiskMaintenance => disk_maintenance(cx),
+        Screen::Resources => resources(cx),
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
@@ -95,6 +99,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Update => update(cx),
         Screen::SkywardUpdate => skyward_update(cx),
         Screen::License => license(cx),
+        Screen::GitHub => github(cx),
         Screen::FontLicense => font_license(cx),
         Screen::Slot => slot(cx),
         Screen::Systems => systems(cx),
@@ -117,6 +122,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
 pub fn confirm_label(which: Confirm, s: &State) -> (&'static str, bool) {
     const INSTALL: Text = ["滑动以安装", "滑動以安裝", "Slide to install"];
     let (label, danger) = match which {
+        Confirm::DiskMaintenance => (["滑动以进入磁盘维护", "滑動以進入磁碟維護", "Slide to enter disk maintenance"], true),
         Confirm::Filesystem => match s.fs_action {
             FsAction::Repair => (["滑动以修复", "滑動以修復", "Slide to repair"], true),
             FsAction::Remake(_) => (["滑动以更换", "滑動以更換", "Slide to change"], true),
@@ -167,11 +173,13 @@ const SPECS: Text = ["全部参数与信息", "全部規格與資訊", "All spec
 const LOGS: Text = ["导出日志", "匯出記錄", "Export logs"];
 const SCREEN_TIMEOUT: Text = ["息屏时间", "螢幕自動關閉", "Screen timeout"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
+const RESOURCES: Text = ["资源下载", "資源下載", "Resource downloads"];
 const SKYWARD_UPDATE: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
 const LANGUAGE: Text = ["语言", "語言", "Language"];
 const TIME_ZONE: Text = ["时区", "時區", "Time zone"];
+const GITHUB: Text = ["GitHub 地址", "GitHub 位址", "GitHub address"];
 const LICENSE: Text = ["开源许可", "開放原始碼授權", "Open source licenses"];
 const FONTS: Text = ["界面字体", "介面字型", "UI fonts"];
 const DUAL_BOOT: Text = ["双系统", "雙系統", "Dual boot"];
@@ -364,14 +372,16 @@ pub fn settings(cx: &Ctx) -> Frame {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
     y = slider.bottom;
-    if s.tablet {
-        y = widgets::section(&mut c, t, f, y, l.pick(["屏幕方向", "螢幕方向", "Screen orientation"]));
-        let rotation = widgets::list(&mut c, t, f, y, &[
-            Row::new(l.pick(["自动旋转", "自動旋轉", "Auto-rotate"])).trail(Trail::Switch(s.auto_rotate)),
-        ]);
-        out.extend(hits(&rotation.rows, &[Action::Toggle(Switch::AutoRotate)]));
-        y = rotation.bottom;
-    }
+    // Piano has no recovery orientation-sensor backend, so do not expose a
+    // switch that cannot take effect.
+    // if s.tablet {
+    //     y = widgets::section(&mut c, t, f, y, l.pick(["屏幕方向", "螢幕方向", "Screen orientation"]));
+    //     let rotation = widgets::list(&mut c, t, f, y, &[
+    //         Row::new(l.pick(["自动旋转", "自動旋轉", "Auto-rotate"])).trail(Trail::Switch(s.auto_rotate)),
+    //     ]);
+    //     out.extend(hits(&rotation.rows, &[Action::Toggle(Switch::AutoRotate)]));
+    //     y = rotation.bottom;
+    // }
     if s.supports_vibration {
         y = widgets::section(&mut c, t, f, y, l.pick(["振动", "震動", "Vibration"]));
         let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
@@ -395,9 +405,27 @@ pub fn settings(cx: &Ctx) -> Frame {
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
+        Row::new(l.pick(GITHUB)).icon(SLATE, Icon::Globe).trail(Trail::Value(l.pick(GITHUB_ADDRESSES[s.github].1))),
+        Row::new(l.pick(["自动解密 data", "自動解密 data", "Auto-decrypt data"]))
+            .icon(BLUE, Icon::Lock)
+            .trail(Trail::Switch(s.auto_decrypt)),
     ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
-    y = widgets::section(&mut c, t, f, general.bottom, "USB");
+    out.extend(hits(
+        &general.rows,
+        &[
+            Action::Open(Screen::Language),
+            Action::Open(Screen::TimeZone),
+            Action::Open(Screen::GitHub),
+            Action::Toggle(Switch::AutoDecrypt),
+        ],
+    ));
+    let note = l.pick([
+        "开启后，进入 recovery 时自动展开 metadata 加密并挂载 data；用户文件仍需锁屏凭据。",
+        "開啟後，進入 recovery 時自動展開 metadata 加密並掛載 data；使用者檔案仍需螢幕鎖定憑證。",
+        "When on, recovery automatically opens metadata encryption and mounts data; user files still need the screen-lock credential.",
+    ]);
+    let general_bottom = widgets::footnote(&mut c, t, f, general.bottom, note);
+    y = widgets::section(&mut c, t, f, general_bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
     let note = l.pick([
@@ -437,6 +465,27 @@ fn skyward_value(cx: &Ctx) -> Option<&'static str> {
         (Some(n), _) if n.newer && n.build.is_some() => Some(l.pick(["有新版本", "有新版本", "New version"])),
         _ => None,
     }
+}
+
+/// The GitHub address pages and release files are read through.
+pub fn github(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = page(cx);
+    let top = t.m.content_top;
+    let rows: Vec<Row> = GITHUB_ADDRESSES
+        .iter()
+        .enumerate()
+        .map(|(k, (_, name))| Row::new(l.pick(*name)).trail(Trail::Check(k == s.github)))
+        .collect();
+    let list = widgets::list(&mut c, t, f, top, &rows);
+    let picks = GITHUB_ADDRESSES.iter().enumerate().map(|(k, _)| Action::ChooseGithub(k)).collect::<Vec<_>>();
+    let note = l.pick([
+        "用于 Skyward 更新、资源下载等需要访问 GitHub 的功能。镜像会读取相同资源页和文件，SHA-256 校验仍会执行。",
+        "用於 Skyward 更新、資源下載等需要存取 GitHub 的功能。鏡像會讀取相同資源頁和檔案，SHA-256 驗證仍會執行。",
+        "Used by Skyward updates, resource downloads and other GitHub features. Mirrors serve the same Resources and files, and SHA-256 is still checked.",
+    ]);
+    let y = widgets::footnote(&mut c, t, f, list.bottom, note);
+    Frame::new(t, fit(c, t, y), hits(&list.rows, &picks), l.pick(GITHUB), top)
 }
 
 /// How long the screen stays on with nothing touched, opened from the
@@ -2238,29 +2287,241 @@ pub fn advanced(cx: &Ctx) -> Frame {
     let (t, f, l) = (cx.t, cx.f, cx.state.lang);
     let mut c = page(cx);
     let top = t.m.content_top;
-    let tools = widgets::list(&mut c, t, f, top, &[
+    let mut rows = vec![
         Row::new(l.pick(FILES)).icon(BLUE, Icon::Folder),
         Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal),
         Row::new(l.pick(RELABEL)).icon(PURPLE, Icon::Shield),
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
-    ]);
-    let out = hits(&tools.rows, &[
+        Row::new(l.pick(RESOURCES)).icon(ORANGE, Icon::Globe),
+    ];
+    let mut actions = vec![
         Action::Open(Screen::Files),
         Action::Open(Screen::Terminal),
         Action::Open(Screen::Relabel),
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Update),
-    ]);
+        Action::Open(Screen::Resources),
+    ];
+    if cx.state.advanced_tools {
+        rows.push(Row::new(l.pick(DISK_MAINTENANCE)).icon(RED, Icon::Usb));
+        actions.push(Action::Open(Screen::DiskMaintenance));
+    }
+    let tools = widgets::list(&mut c, t, f, top, &rows);
+    let out = hits(&tools.rows, &actions);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
 }
 
+const MASS_STORAGE: Text = ["开启 USB 大容量存储", "開啟 USB 大容量儲存", "Enable USB mass storage"];
+const REPAIR_GPT: Text = ["修复 GPT", "修復 GPT", "Repair GPT"];
+const DISK_MAINTENANCE: Text = ["磁盘维护", "磁碟維護", "Disk maintenance"];
 const RELABEL: Text = ["修复 SELinux 上下文", "修復 SELinux 上下文", "Fix SELinux contexts"];
 const FILESYSTEMS: Text = ["文件系统", "檔案系統", "Filesystems"];
 const STOPPED: Text = ["已停止", "已停止", "Stopped"];
 const STOPPING: Text = ["正在停止", "正在停止", "Stopping"];
+
+/// Whole-disk work, entered only by a swipe and then worked with the keys.
+/// Releasing or rewriting the disk can take the touchscreen away, so this
+/// page never returns to Advanced: it ends at a restart.
+pub fn disk_maintenance(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let work: &DiskMaintenance = &s.disk_maintenance;
+    if !work.entered {
+        let warning = l.pick([
+            "这些操作会停止使用磁盘的服务、卸载分区或重写分区表。进入后无法返回，只能重启 Recovery。",
+            "這些操作會停止使用磁碟的服務、卸載分割區或重寫分割表。進入後無法返回，只能重新啟動 Recovery。",
+            "These tools stop services that use the disk, unmount partitions or rewrite partition tables. Once entered, the only way out is restarting recovery.",
+        ]);
+        let y = widgets::paragraph(&mut c, t, f, top, warning);
+        let (label, danger) = confirm_label(Confirm::DiskMaintenance, s);
+        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(28.0), label, danger, s.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::DiskMaintenance) });
+        return Frame::new(t, c, out, l.pick(DISK_MAINTENANCE), top);
+    }
+
+    match work.tool {
+        None => {
+            let y = widgets::section_first(&mut c, t, f, top, l.pick(["选择维护操作", "選擇維護操作", "Choose maintenance"]));
+            let rows = [
+                Row::new(l.pick(MASS_STORAGE))
+                    .icon(BLUE, Icon::Usb)
+                    .subtitle(l.pick(["将主 UFS 磁盘导出为 USB 大容量存储", "將主 UFS 磁碟匯出為 USB 大容量儲存", "Export the main UFS disk as USB mass storage"])),
+                Row::new(l.pick(REPAIR_GPT))
+                    .icon(RED, Icon::Mount)
+                    .subtitle(l.pick(["重写 UFS 分区表，完成后必须重启 Recovery", "重寫 UFS 分割表，完成後必須重新啟動 Recovery", "Rewrite the UFS partition tables; recovery must restart afterward"])),
+            ];
+            let choices = widgets::list(&mut c, t, f, y, &rows);
+            out.extend(hits(&choices.rows, &[Action::EnableMassStorage, Action::RepairGpt]));
+            widgets::footnote(&mut c, t, f, choices.bottom, l.pick(["按音量键选择，按电源键确认。触摸屏操作已禁用，进入后不可返回。", "按音量鍵選擇，按電源鍵確認。觸控螢幕操作已停用，進入後不可返回。", "Choose with the volume keys and confirm with the power key. Touch is disabled and there is no way back."]));
+        }
+        Some(tool) => {
+            let name = match tool {
+                DiskTool::MassStorage => l.pick(MASS_STORAGE),
+                DiskTool::RepairGpt => l.pick(REPAIR_GPT),
+            };
+            let heading = l.pick(if work.running {
+                ["正在维护", "正在維護", "Maintaining"]
+            } else {
+                ["维护结束", "維護結束", "Maintenance ended"]
+            });
+            let y = widgets::section_first(&mut c, t, f, top, heading);
+            let status = if work.running {
+                l.pick(["正在执行", "正在執行", "Running"]).to_string()
+            } else {
+                match &work.result {
+                    Some(Ok(done)) => done.clone(),
+                    Some(Err(why)) => why.clone(),
+                    None => l.pick(["已完成", "已完成", "Done"]).to_string(),
+                }
+            };
+            let y = widgets::info_card(&mut c, t, f, y, &[(name, status)]);
+            if !work.running {
+                let y = widgets::section(&mut c, t, f, y, l.pick(["重启", "重新啟動", "Restart"]));
+                let rows = [
+                    Row::new(l.pick(["重启到 Recovery", "重新啟動到 Recovery", "Restart to recovery"])).icon(ORANGE, Icon::Power),
+                    Row::new(l.pick(["重启到系统", "重新啟動到系統", "Restart to system"])).icon(ORANGE, Icon::Power),
+                    Row::new(l.pick(["关机", "關機", "Power off"])).icon(RED, Icon::Power),
+                ];
+                let choices = widgets::list(&mut c, t, f, y, &rows);
+                out.extend(hits(&choices.rows, &[
+                    Action::RebootTo(Target::Recovery),
+                    Action::RebootTo(Target::System),
+                    Action::RebootTo(Target::PowerOff),
+                ]));
+                widgets::footnote(&mut c, t, f, choices.bottom, l.pick(["按音量键选择，按电源键确认。", "按音量鍵選擇，按電源鍵確認。", "Choose with the volume keys and confirm with the power key."]));
+            }
+        }
+    }
+    Frame { back: false, ..Frame::new(t, c, out, l.pick(DISK_MAINTENANCE), top) }
+}
+
+/// Files in Skyward's shared GitHub resource release.
+pub fn resources(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let gap = t.m.card_gap;
+    let y = widgets::section_first(&mut c, t, f, top, l.pick(["GitHub 资源", "GitHub 資源", "GitHub resources"]));
+    let mut y = match &s.resources_check {
+        ResourcesCheck::Asking => widgets::list(
+            &mut c,
+            t,
+            f,
+            y,
+            &[Row::new(l.pick(["正在获取资源列表", "正在取得資源清單", "Getting the resource list"])).trail(Trail::None)],
+        )
+        .bottom,
+        ResourcesCheck::Failed(why) => {
+            let mut row = Row::new(l.pick(["重新获取", "重新取得", "Try again"]));
+            if !s.online() {
+                row = row.subtitle(l.pick(WLAN_FIRST));
+            }
+            let check = widgets::list(&mut c, t, f, y, &[row]);
+            out.extend(hits(&check.rows, &[Action::CheckResources]));
+            widgets::footnote(&mut c, t, f, check.bottom, &fmt::unanswered(l, why))
+        }
+        ResourcesCheck::Answered(builds) => {
+            let y = if let Some(job) = &s.resource_job {
+                match (&job.outcome, job.progress) {
+                    (None, progress) => {
+                        let (heading, detail, share) = match progress {
+                            None => (l.pick(GETTING_READY), String::new(), None),
+                            Some(progress) => downloaded(l, progress, job.rate),
+                        };
+                        let y = widgets::progress_card(&mut c, t, f, y, heading, &detail, share);
+                        let stop = widgets::list(
+                            &mut c,
+                            t,
+                            f,
+                            y + gap,
+                            &[Row::new(l.pick(if job.stopping { STOPPING } else { STOP })).trail(Trail::None)],
+                        );
+                        if !job.stopping {
+                            out.extend(hits(&stop.rows, &[Action::StopResource]));
+                        }
+                        return Frame::new(t, fit(c, t, stop.bottom), out, l.pick(RESOURCES), top);
+                    }
+                    (Some(DownloadEnd::Downloaded), _) => {
+                        let name = &job.build.name;
+                        let detail = l.pick(["已下载并通过 SHA-256 校验", "已下載並通過 SHA-256 驗證", "Downloaded and verified with SHA-256"]);
+                        let y = widgets::list(
+                            &mut c,
+                            t,
+                            f,
+                            y,
+                            &[standing(name, GREEN, Icon::Install, detail)],
+                        )
+                        .bottom;
+                        let row = Row::new(l.pick(["用安装器打开", "用安裝器開啟", "Open with the installer"])).subtitle(l.pick([
+                            "由 Skyward 按文件内容判断能否安装",
+                            "由 Skyward 按檔案內容判斷能否安裝",
+                            "Skyward decides from the file contents whether it can install it",
+                        ]));
+                        let install = widgets::list(&mut c, t, f, y + gap, &[row]);
+                        out.extend(hits(&install.rows, &[Action::OpenResource]));
+                        install.bottom
+                    }
+                    (Some(DownloadEnd::Stopped), _) => {
+                        widgets::footnote(&mut c, t, f, y, l.pick(["已暂停下载。", "已暫停下載。", "Download paused."]))
+                    }
+                    (Some(DownloadEnd::Failed(why)), _) => widgets::footnote(&mut c, t, f, y, &fmt::download_failure(l, why)),
+                }
+            } else {
+                y
+            };
+            let sizes: Vec<String> = builds
+                .iter()
+                .map(|build| {
+                    if build.size == 0 {
+                        l.pick(["未知", "未知", "Unknown"]).to_string()
+                    } else {
+                        fmt::file_size(build.size)
+                    }
+                })
+                .collect();
+            let subtitles: Vec<String> = builds
+                .iter()
+                .zip(&sizes)
+                .map(|(build, size)| format!("{size:<12}   {}", build.sha256))
+                .collect();
+            let rows: Vec<Row> = builds
+                .iter()
+                .zip(&subtitles)
+                .map(|(build, subtitle)| Row::new(&build.name).icon(ORANGE, Icon::Folder).subtitle_nowrap(subtitle).trail(Trail::None))
+                .collect();
+            let choice = widgets::list(&mut c, t, f, y + gap, &rows);
+            out.extend(hits(&choice.rows, &(0..builds.len()).map(Action::DownloadResource).collect::<Vec<_>>()));
+            choice.bottom
+        }
+        ResourcesCheck::Idle => {
+            let row = widgets::list(
+                &mut c,
+                t,
+                f,
+                y,
+                &[Row::new(l.pick(["连接 WLAN 后获取资源列表", "連接 Wi-Fi 後取得資源清單", "Connect to Wi-Fi to get the resource list"])).trail(Trail::None)],
+            );
+            out.extend(hits(&row.rows, &[Action::CheckResources]));
+            row.bottom
+        }
+    };
+    let folder = widgets::list(
+        &mut c,
+        t,
+        f,
+        y + gap,
+        &[Row::new(l.pick(["打开下载文件夹", "開啟下載資料夾", "Open download folder"])).icon(BLUE, Icon::Folder)],
+    );
+    out.extend(hits(&folder.rows, &[Action::OpenResourceFolder]));
+    y = folder.bottom;
+    Frame::new(t, fit(c, t, y), out, l.pick(RESOURCES), top)
+}
 
 /// Giving the data partition's files the SELinux labels the installed
 /// system's rules give them: what it does, and a swipe to start it; then
