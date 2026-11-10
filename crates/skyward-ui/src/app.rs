@@ -5413,6 +5413,13 @@ impl App {
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
                 }
+                // Turning remembering off has to take the sealed file away,
+                // not only the copy the pages hold: a credential left on the
+                // phone after the switch was turned off is the one thing the
+                // switch promises not to do.
+                if switch == Switch::RememberPassword && !now_on {
+                    return vec![Effect::RememberPassword(None)];
+                }
             }
             Action::MountToggle(i) => {
                 if self.state.mount_failure.take().is_some() {
@@ -8372,20 +8379,26 @@ mod tests {
         use skyward_install::commands::avbctl;
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Advanced, W, H, PPD);
-        // Opening it reads the slot afresh, because a zip may have
-        // flashed a vbmeta image since the page was last looked at.
-        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Avb)), vec![Effect::ReadAvb]);
+        // Opening it reads the slot afresh, because a zip may have flashed a
+        // vbmeta image since the page was last looked at. Worked through
+        // `act` rather than a touch: what it does is the question here, not
+        // where the row is drawn.
+        assert_eq!(app.act(Action::Open(Screen::Avb), 0), vec![Effect::ReadAvb]);
         let state = avbctl::State { suffix: "_a".into(), flags: 0, unlocked: true, digest: [0; 32] };
         app.avb_read(Ok(state.clone()), None);
-        // A touch on a row only holds the request: nothing is written
-        // until the page's own swipe agrees to it.
+        // A touch on a row only holds the request: nothing is written until
+        // the page's own swipe agrees to it.
         let saved = app.settings();
-        assert!(tap(&mut app, &f, &i, Action::AvbToggle(avbctl::Check::Verification)).is_empty());
+        assert!(app.act(Action::AvbToggle(avbctl::Check::Verification), 1000).is_empty());
         assert_eq!(app.settings(), saved, "a pending change is not a saved setting");
         assert_eq!(app.state.avb, Some(Ok(state.clone())), "and does not claim a disk change");
-        tap(&mut app, &f, &i, Action::CancelAvb);
+        assert_eq!(app.state.avb_pending, Some((state.clone(), avbctl::Check::Verification, true)));
+        app.act(Action::CancelAvb, 2000);
         assert!(app.state.avb_pending.is_none(), "the request can be taken back");
-        tap(&mut app, &f, &i, Action::AvbToggle(avbctl::Check::Verification));
+        app.act(Action::AvbToggle(avbctl::Check::Verification), 3000);
+        // The page has to draw the swipe before it can be worked, and it is
+        // the swipe that writes.
+        app.frame(&f, &i);
         assert_eq!(
             swipe(&mut app, &f, &i, Confirm::Avb),
             vec![Effect::SetAvb { expected: state, check: avbctl::Check::Verification, disabled: true }]
@@ -8396,23 +8409,22 @@ mod tests {
     #[test]
     fn an_avb_state_that_could_not_be_read_or_is_locked_offers_no_write() {
         use skyward_install::commands::avbctl;
-        let (f, i) = (fonts(), info());
-        for unreadable in [Err("cannot read vbmeta".to_string()), Ok(avbctl::State { suffix: "_a".into(), flags: 0, unlocked: false, digest: [0; 32] })] {
+        let locked = avbctl::State { suffix: "_a".into(), flags: 0, unlocked: false, digest: [0; 32] };
+        for unreadable in [Err("cannot read vbmeta".to_string()), Ok(locked)] {
             let mut app = App::new(Screen::Avb, W, H, PPD);
-            let locked = matches!(&unreadable, Ok(s) if !s.unlocked);
             app.avb_read(unreadable, None);
-            assert!(tap(&mut app, &f, &i, Action::AvbToggle(avbctl::Check::Verity)).is_empty());
-            assert!(app.state.avb_pending.is_none(), "a locked bootloader changes nothing from the page");
-            assert!(locked || app.state.avb.as_ref().is_some_and(|r| r.is_err()));
+            app.act(Action::AvbToggle(avbctl::Check::Verity), 1000);
+            assert!(app.state.avb_pending.is_none(), "a state the page cannot act on reaches no write");
+            app.act(Action::Confirm(Confirm::Avb), 2000);
+            assert!(app.state.avb_pending.is_none());
         }
     }
 
     #[test]
     fn installing_a_rom_honours_the_avb_switch_and_it_is_saved() {
-        let (f, i) = (fonts(), info());
-        let mut app = opened(Screen::Install, &f, &i);
+        let mut app = App::new(Screen::Install, W, H, PPD);
         assert!(!app.state.disable_avb, "a ROM is installed without turning the checks off");
-        assert!(tap(&mut app, &f, &i, Action::Toggle(Switch::DisableAvb)).is_empty());
+        assert!(app.act(Action::Toggle(Switch::DisableAvb), 1000).is_empty());
         assert!(app.state.disable_avb);
         let saved = crate::settings::Settings::of(&app.state);
         let mut next = State::default();
@@ -8422,17 +8434,15 @@ mod tests {
 
     #[test]
     fn turning_remembering_off_forgets_the_credential_it_held() {
-        let (f, i) = (fonts(), info());
-        let mut app = opened(Screen::Settings, &f, &i);
+        let mut app = App::new(Screen::Settings, W, H, PPD);
         app.state.remember_password = true;
         app.state.remembered = Some("1234".into());
-        // Off: what was held is dropped, and the runtime is told to take
-        // the sealed file away with it.
-        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::RememberPassword)), vec![Effect::RememberPassword(None)]);
+        // Off: what was held is dropped, and the runtime is told to take the
+        // sealed file away with it.
+        assert_eq!(app.act(Action::Toggle(Switch::RememberPassword), 1000), vec![Effect::RememberPassword(None)]);
         assert!(app.state.remembered.is_none(), "the credential goes with the switch");
         assert!(!app.state.remember_password);
     }
-
     #[test]
     fn the_two_tap_switch_shows_only_where_the_panel_offers_it_and_starts_off() {
         let (f, i) = (fonts(), info());
