@@ -3865,10 +3865,7 @@ pub fn license(cx: &Ctx) -> Frame {
         "GNU 通用公眾授權條款第 3 版或更新的版本（GPL-3.0-or-later）",
         "GNU General Public License, version 3 or later (GPL-3.0-or-later)",
     ]);
-    let y = widgets::info_card(&mut c, t, f, top, &[
-        (l.pick(LICENSE_TERMS), terms.to_string()),
-        (l.pick(["移植版署名", "移植版署名", "Port attribution"]), AUTHOR.to_string()),
-    ]);
+    let y = widgets::info_card(&mut c, t, f, top, &[(l.pick(LICENSE_TERMS), terms.to_string())]);
     let bottom = match l {
         Lang::Hans | Lang::Hant => {
             let notice = if l == Lang::Hans { LICENSE_NOTICE[0] } else { LICENSE_NOTICE[1] };
