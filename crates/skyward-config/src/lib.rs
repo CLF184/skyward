@@ -225,28 +225,42 @@ pub struct Disk {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct MassStorage {
-    /// Script that configures the USB gadget.
-    pub start_script: String,
-    /// Script that unmounts what the disk still backs.
-    pub unmount_script: String,
+    /// Script called with gadget path, disk path, UDC, vendor ID and product ID.
+    pub start_script: DiskResource,
+    /// Script called with the disk path to unmount what it still backs.
+    pub unmount_script: DiskResource,
+    pub controller: String,
+    pub vendor_id: u16,
+    pub product_id: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Gpt {
     /// Disks under `/dev/block` whose GPT tables are repaired.
     pub disks: Vec<String>,
-    /// Optional script run after mounts are released and before gdisk.
+    /// Optional script called with the dmctl path before gdisk runs.
     #[serde(default)]
-    pub prepare_script: Option<String>,
+    pub prepare_script: Option<DiskResource>,
     /// gdisk and the device-mapper control program.
-    pub gdisk: String,
-    pub dmctl: String,
+    pub gdisk: DiskResource,
+    pub dmctl: DiskResource,
     /// The UUID library gdisk loads.
-    pub uuid_library: String,
+    pub uuid_library: DiskResource,
     /// Input sent to gdisk for the tested repair sequence.
     pub input: String,
     /// Text gdisk prints when the repair completed.
     pub success: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DiskResource {
+    /// Source file relative to the device TOML file, read by the packer.
+    pub source: String,
+    /// Absolute path in the recovery ramdisk.
+    pub path: String,
+    /// Expected digest, where the configuration pins the source bytes.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// A file a driver asks the firmware loader for, and where it is.
@@ -756,7 +770,7 @@ impl DeviceConfig {
             for path in [&disk.device, &disk.gadget] {
                 ensure!(Path::new(path).is_absolute(), "[disk] {path} is not an absolute path");
             }
-            for path in [
+            for resource in [
                 &disk.mass_storage.start_script,
                 &disk.mass_storage.unmount_script,
                 &disk.gpt.gdisk,
@@ -766,8 +780,18 @@ impl DeviceConfig {
             .into_iter()
             .chain(disk.gpt.prepare_script.iter())
             {
-                ensure!(Path::new(path).is_absolute(), "[disk] {path} is not an absolute path");
+                let plain = resource.path.strip_prefix('/').is_some_and(|path| {
+                    path.split('/').all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\0'))
+                });
+                ensure!(plain,
+                    "[disk] {} is not an absolute path to a file", resource.path);
+                ensure!(!resource.source.is_empty() && Path::new(&resource.source).is_relative(),
+                    "[disk] {} is not a path relative to the device TOML file", resource.source);
+                ensure!(resource.sha256.as_ref().is_none_or(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())),
+                    "[disk] {} has an invalid SHA-256", resource.source);
             }
+            ensure!(!disk.mass_storage.controller.is_empty() && !disk.mass_storage.controller.contains(char::is_whitespace),
+                "[disk.mass_storage] controller must be a USB device controller name");
             ensure!(!disk.gpt.disks.is_empty(), "[disk.gpt] disks must not be empty");
             for name in &disk.gpt.disks {
                 ensure!(!name.is_empty() && !name.contains('/'), "[disk.gpt] {name:?} is not a disk name");

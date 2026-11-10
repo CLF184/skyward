@@ -126,23 +126,26 @@ fn main() -> Result<()> {
                 );
             }
             if let Some(disk) = &cfg.disk {
-                ensure!(
-                    hex(&Sha256::digest(DISK_GDISK)) == DISK_GDISK_SHA256,
-                    "the bundled gdisk is not the tested binary"
-                );
-                ensure!(
-                    hex(&Sha256::digest(DISK_GDISK_UUID)) == DISK_GDISK_UUID_SHA256,
-                    "the bundled UUID library is not the tested library"
-                );
-                ensure!(hex(&Sha256::digest(DISK_DMCTL)) == DISK_DMCTL_SHA256, "the bundled dmctl is not the reference binary");
-                put(&mut rd, &disk.mass_storage.start_script, 0o755, include_bytes!("../../../resources/piano/piano-msc-start.sh"))?;
-                put(&mut rd, &disk.mass_storage.unmount_script, 0o755, include_bytes!("../../../resources/piano/piano-msc-unmount.sh"))?;
-                if let Some(script) = &disk.gpt.prepare_script {
-                    put(&mut rd, script, 0o755, include_bytes!("../../../resources/piano/piano-fixgpt-unmount.sh"))?;
+                let directory = config.parent().context("the device configuration has no parent directory")?;
+                for (resource, mode) in [
+                    (&disk.mass_storage.start_script, 0o755),
+                    (&disk.mass_storage.unmount_script, 0o755),
+                    (&disk.gpt.gdisk, 0o755),
+                    (&disk.gpt.dmctl, 0o755),
+                    (&disk.gpt.uuid_library, 0o644),
+                ]
+                .into_iter()
+                .chain(disk.gpt.prepare_script.iter().map(|script| (script, 0o755)))
+                {
+                    let source = directory.join(&resource.source);
+                    let data = read(&source)?;
+                    if let Some(expected) = &resource.sha256 {
+                        let actual = hex(&Sha256::digest(&data));
+                        ensure!(actual.eq_ignore_ascii_case(expected),
+                            "{} has SHA-256 {actual}, expected {expected}", source.display());
+                    }
+                    put(&mut rd, &resource.path, mode, data)?;
                 }
-                put(&mut rd, &disk.gpt.gdisk, 0o755, DISK_GDISK)?;
-                put(&mut rd, &disk.gpt.dmctl, 0o755, DISK_DMCTL)?;
-                put(&mut rd, &disk.gpt.uuid_library, 0o644, DISK_GDISK_UUID)?;
             }
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
@@ -241,25 +244,18 @@ fn configure_init(rd: &mut Ramdisk, config: &skyward_config::DeviceConfig) -> Re
 /// The partition a recovery is made on, as a full update package names it.
 const RECOVERY: &str = "recovery";
 
-/// The tested ARM64 gdisk and the UUID library it needs, for a device whose
-/// configuration enables whole-disk maintenance.
-const DISK_GDISK: &[u8] = include_bytes!("../../../resources/piano/gdisk");
-const DISK_GDISK_UUID: &[u8] = include_bytes!("../../../resources/piano/libext2_uuid.so");
-const DISK_DMCTL: &[u8] = include_bytes!("../../../resources/piano/dmctl");
-const DISK_DMCTL_SHA256: &str = "c6fa26b4b199eb1ee1798cdf71d2c34659d4ca6ecfa7d2d3686637c2900454cb";
-const DISK_GDISK_SHA256: &str = "3ecffce384482b47fc76742f404a125c652a892f3f370603e9023eb06ee56751";
-const DISK_GDISK_UUID_SHA256: &str = "a0560f406c35679ce9c0c644b243dd9588f83e05f8dbed4128604c182b4b197f";
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Put a configured device resource in the ramdisk, replacing a stock file
 /// of the same path or adding it when there is none.
-fn put(rd: &mut Ramdisk, path: &str, mode: u32, data: &[u8]) -> Result<()> {
+fn put(rd: &mut Ramdisk, path: &str, mode: u32, data: Vec<u8>) -> Result<()> {
+    let path = path.trim_start_matches('/');
     if rd.find(path).is_some() {
-        rd.replace(path, data.to_vec())
+        rd.replace(path, data)
     } else {
-        rd.add(path, mode, data.to_vec())
+        rd.add(path, mode, data)
     }
 }
 

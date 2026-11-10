@@ -65,7 +65,8 @@ pub fn repair_gpt(cfg: &DeviceConfig, slot: Option<Slot>) -> Result<Vec<String>>
     check_gpt(cfg)?;
     prepare_disk(cfg, disk, slot)?;
     if let Some(script) = &disk.gpt.prepare_script {
-        let prepared = Command::new("/system/bin/sh").arg(script).status().with_context(|| format!("run {script}"))?;
+        let script = &script.path;
+        let prepared = Command::new("/system/bin/sh").args([script, &disk.gpt.dmctl.path]).status().with_context(|| format!("run {script}"))?;
         ensure!(prepared.success(), "{script} ended {prepared}");
     }
     let mut repaired = Vec::new();
@@ -90,7 +91,7 @@ pub fn repair_gpt(cfg: &DeviceConfig, slot: Option<Slot>) -> Result<Vec<String>>
 pub fn check_gpt(cfg: &DeviceConfig) -> Result<()> {
     let disk = configured(cfg)?;
     ensure!(!mass_storage_active(disk)?, "USB mass storage must be disabled by restarting the recovery first");
-    for tool in [&disk.gpt.gdisk, &disk.gpt.dmctl] {
+    for tool in [&disk.gpt.gdisk.path, &disk.gpt.dmctl.path] {
         let tool = std::ffi::CString::new(tool.as_bytes()).context("tool path")?;
         ensure!(
             unsafe { libc::access(tool.as_ptr(), libc::X_OK) } == 0,
@@ -104,7 +105,7 @@ pub fn check_gpt(cfg: &DeviceConfig) -> Result<()> {
 /// Run gdisk with the configured repair sequence.
 fn fix_gpt_with_gdisk(gpt: &Gpt, device: &Path) -> Result<()> {
     let output = Command::new("/system/bin/sh")
-        .args(["-c", "printf '%s' \"$1\" | \"$2\" \"$3\"", "sh", &gpt.input, &gpt.gdisk])
+        .args(["-c", "printf '%s' \"$1\" | \"$2\" \"$3\"", "sh", &gpt.input, &gpt.gdisk.path])
         .arg(device)
         .output()
         .with_context(|| format!("run gdisk on {}", device.display()))?;
@@ -139,8 +140,8 @@ fn prepare_disk(cfg: &DeviceConfig, disk: &Disk, slot: Option<Slot>) -> Result<(
         skyward_vab::unmount_partitions(slot).context("unmap the installed system's logical partitions")?;
     }
     unsafe { libc::sync() };
-    let script = &disk.mass_storage.unmount_script;
-    let unmounted = Command::new("/system/bin/sh").arg(script).status().with_context(|| format!("run {script}"))?;
+    let script = &disk.mass_storage.unmount_script.path;
+    let unmounted = Command::new("/system/bin/sh").args([script, &disk.device]).status().with_context(|| format!("run {script}"))?;
     ensure!(unmounted.success(), "{script} ended {unmounted}");
     unsafe { libc::sync() };
     // Like the reference, try to invalidate the kernel's cache for the LUN.
@@ -152,9 +153,11 @@ fn prepare_disk(cfg: &DeviceConfig, disk: &Disk, slot: Option<Slot>) -> Result<(
 
 fn export(disk: &Disk) -> Result<()> {
     ensure!(Path::new(&disk.gadget).exists(), "{} is not mounted", disk.gadget);
-    let script = &disk.mass_storage.start_script;
+    let msc = &disk.mass_storage;
+    let script = &msc.start_script.path;
     let output = Command::new("/system/bin/sh")
-        .arg(script)
+        .args([script, &disk.gadget, &disk.device, &msc.controller,
+            &format!("0x{:04x}", msc.vendor_id), &format!("0x{:04x}", msc.product_id)])
         .output()
         .with_context(|| format!("run {script}"))?;
     ensure!(

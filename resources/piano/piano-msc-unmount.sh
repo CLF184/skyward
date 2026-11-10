@@ -1,8 +1,13 @@
 #!/system/bin/sh
 set -eu
 
+disk=$(readlink -f "$1")
+disk=${disk##*/}
+
 on_export_disk() {
-    case "$1" in sda|sda[0-9]*) return 0 ;; esac
+    if [ "$1" = "$disk" ] || [ -f "/sys/class/block/$disk/$1/partition" ]; then
+        return 0
+    fi
     for slave in /sys/class/block/"$1"/slaves/*; do
         [ -e "$slave" ] || continue
         if on_export_disk "${slave##*/}"; then return 0; fi
@@ -20,4 +25,4 @@ done < /proc/mounts | sort -r | while read -r target; do
     umount "$target" || exit 1
 done
 sync
-echo 'All mounted filesystems on sda were unmounted normally.'
+echo "All mounted filesystems on $disk were unmounted normally."

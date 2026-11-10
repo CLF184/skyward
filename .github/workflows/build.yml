@@ -90,7 +90,7 @@ jobs:
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
           else
-            echo 'devices=["piano"]' >> "$GITHUB_OUTPUT"
+            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
           fi
 
   recovery:

@@ -1,7 +1,11 @@
 #!/system/bin/sh
-set -e
+set -eu
 
-g=/config/usb_gadget/g1
+g=$1
+disk=$2
+controller=$3
+vendor_id=$4
+product_id=$5
 trap 'status=$?; if [ "$status" -ne 0 ]; then
     set +e
     if [ -n "$(cat "$g/UDC")" ]; then echo "" > "$g/UDC"; fi
@@ -19,15 +23,15 @@ while [ "$(getprop sys.usb.state)" != none ]; do
 done
 if [ -n "$(cat "$g/UDC")" ]; then echo "" > "$g/UDC"; fi
 setenforce 0
-echo 0x2717 > "$g/idVendor"
-echo 0x9039 > "$g/idProduct"
+echo "$vendor_id" > "$g/idVendor"
+echo "$product_id" > "$g/idProduct"
 echo 0xEF > "$g/bDeviceClass"
 echo 0x02 > "$g/bDeviceSubClass"
 echo 0x01 > "$g/bDeviceProtocol"
 mkdir -p "$g/functions/mass_storage.0"
 echo 0 > "$g/functions/mass_storage.0/lun.0/ro"
 echo 0 > "$g/functions/mass_storage.0/lun.0/removable"
-echo /dev/block/sda > "$g/functions/mass_storage.0/lun.0/file"
+echo "$disk" > "$g/functions/mass_storage.0/lun.0/file"
 ln -s "$g/functions/mass_storage.0" "$g/configs/b.1/mass_storage.0"
 setprop ctl.start adbd
 retries=0
@@ -37,4 +41,4 @@ while [ "$(getprop sys.usb.ffs.ready)" != 1 ]; do
     sleep 0.1
 done
 ln -s "$g/functions/ffs.adb" "$g/configs/b.1/f1"
-echo a600000.dwc3 > "$g/UDC"
+echo "$controller" > "$g/UDC"
