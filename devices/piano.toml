@@ -29,6 +29,7 @@ ignored_devices = ["NVTCapacitivePenP81c", "NVTCapacitivePenM80p"]
 
 [firmware]
 partition = "modem"
+remoteproc = "adsp"
 
 [partitions]
 mounted = ["persist"]
