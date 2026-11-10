@@ -1262,6 +1262,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // credential sealed by a phone that is not this one.
         let _ = skyward_sys::kmsg("remembering the decrypt password is on, and no credential is kept");
     }
+    // A credential kept from an earlier start is worth nothing unless the data
+    // partition is opened for it: nothing else at a start asks for the owner's
+    // files, so the recovery would sit on the home page with the phone's
+    // storage shut until someone went to the decrypt page — which is the one
+    // thing this switch exists to spare them. So the open is begun here, and
+    // the kept credential goes with it where the phone asks for one.
+    if app.state.remembered.is_some() && !mount::is_mount_point(Path::new(skyward_crypto::data::MOUNT))? {
+        let _ = skyward_sys::kmsg("a kept credential is here, so the data partition is opened at this start");
+        decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
+    }
     // When the panel gone dark began to rest.
     let mut rested_at: Option<Instant> = None;
     // When the panel went dark, which is what the phone's sleep waits out: a
