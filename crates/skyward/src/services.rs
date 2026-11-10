@@ -12,6 +12,7 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,10 @@ const RESTART_DELAY: Duration = Duration::from_secs(1);
 /// How long a program gets to become what it says it will be.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(100);
+
+/// Paths stopped for disk work. Hold the lock while spawning so a stopped
+/// service cannot slip past the process scan by starting concurrently.
+static STOPPED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// Where the kernel says the highest capability it knows.
 const CAP_LAST_CAP: &str = "/proc/sys/kernel/cap_last_cap";
@@ -201,9 +206,12 @@ fn ready(s: &Service) -> Result<()> {
     }
 }
 
-fn supervise(s: &Service, who: &Credentials, accounts: &HashMap<String, u32>) -> ! {
+fn supervise(s: &Service, who: &Credentials, accounts: &HashMap<String, u32>) {
     let mut sockets = None;
     loop {
+        if STOPPED.lock().expect("stopped service paths").contains(&s.path) {
+            return;
+        }
         let started = Instant::now();
         let ended = match running(&s.path) {
             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
@@ -232,9 +240,55 @@ fn supervise(s: &Service, who: &Credentials, accounts: &HashMap<String, u32>) ->
     }
 }
 
+/// Stop configured services before work that unmounts or rewrites the whole
+/// disk, and keep their supervisors from starting them again.
+pub fn stop_all(services: &[Service]) -> Result<()> {
+    let paths: Vec<&Path> = services.iter().filter(|s| !s.oneshot).map(|s| Path::new(&s.path)).collect();
+    STOPPED.lock().expect("stopped service paths").extend(
+        services.iter().filter(|s| !s.oneshot).map(|s| s.path.clone()),
+    );
+    let mut pids = Vec::new();
+    for path in paths {
+        pids.extend(running_all(path)?);
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in &pids {
+        let ended = unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) };
+        if ended != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("stop process {pid}"));
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(3);
+    while pids.iter().any(|pid| Path::new(&format!("/proc/{pid}")).exists()) {
+        if Instant::now() >= until {
+            for pid in &pids {
+                if Path::new(&format!("/proc/{pid}")).exists() {
+                    unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+                }
+            }
+            break;
+        }
+        thread::sleep(READY_POLL);
+    }
+    for pid in &pids {
+        let until = Instant::now() + Duration::from_secs(1);
+        while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < until {
+            thread::sleep(READY_POLL);
+        }
+        ensure!(!Path::new(&format!("/proc/{pid}")).exists(), "process {pid} did not stop");
+    }
+    Ok(())
+}
+
 /// Start the program and wait for it to end.
 fn run(s: &Service, who: &Credentials, sockets: &[Listening]) -> Result<String> {
+    let stopped = STOPPED.lock().expect("stopped service paths");
+    if stopped.contains(&s.path) {
+        return Ok("stopped for disk work".into());
+    }
     let mut child = command(s, who, sockets)?.spawn().with_context(|| format!("start {}", s.path))?;
+    drop(stopped);
     let status = child.wait().context("wait for it")?;
     Ok(format!("pid {} ended: {status}", child.id()))
 }
@@ -429,6 +483,20 @@ pub fn running(path: &str) -> Option<u32> {
         let pid: u32 = e.file_name().to_str()?.parse().ok()?;
         (fs::read_link(e.path().join("exe")).ok()? == Path::new(path)).then_some(pid)
     })
+}
+
+fn running_all(path: &Path) -> Result<Vec<u32>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir("/proc").context("read /proc")? {
+        let entry = entry.context("read /proc")?;
+        let Some(pid) = entry.file_name().to_str().and_then(|p| p.parse().ok()) else {
+            continue;
+        };
+        if fs::read_link(entry.path().join("exe")).ok().as_deref() == Some(path) {
+            out.push(pid);
+        }
+    }
+    Ok(out)
 }
 
 /// Wait for a process that is not our child to exit.

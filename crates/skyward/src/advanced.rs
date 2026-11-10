@@ -1,7 +1,7 @@
 //! The whole-disk tools a device configuration offers in Advanced: export
 //! its main disk to a computer, and repair the GPT tables it lists.
 
-use crate::wipe;
+use crate::{services, wipe};
 use anyhow::{ensure, Context, Result};
 use skyward_config::{DeviceConfig, Disk, Gpt};
 use skyward_vab::Slot;
@@ -53,7 +53,7 @@ impl Drop for GptWorker {
 pub fn enable_mass_storage(cfg: &DeviceConfig, slot: Option<Slot>) -> Result<()> {
     let disk = configured(cfg)?;
     ensure!(!mass_storage_active(disk)?, "USB mass storage is already enabled");
-    prepare_disk(disk, slot)?;
+    prepare_disk(cfg, disk, slot)?;
     export(disk)
 }
 
@@ -63,7 +63,7 @@ pub fn enable_mass_storage(cfg: &DeviceConfig, slot: Option<Slot>) -> Result<()>
 pub fn repair_gpt(cfg: &DeviceConfig, slot: Option<Slot>) -> Result<Vec<String>> {
     let disk = configured(cfg)?;
     check_gpt(cfg)?;
-    prepare_disk(disk, slot)?;
+    prepare_disk(cfg, disk, slot)?;
     if let Some(script) = &disk.gpt.prepare_script {
         let prepared = Command::new("/system/bin/sh").arg(script).status().with_context(|| format!("run {script}"))?;
         ensure!(prepared.success(), "{script} ended {prepared}");
@@ -132,7 +132,8 @@ fn configured(cfg: &DeviceConfig) -> Result<&Disk> {
 
 /// Let go of mappings that can keep a filesystem on the disk mounted, then
 /// unmount what the configured script releases.
-fn prepare_disk(disk: &Disk, slot: Option<Slot>) -> Result<()> {
+fn prepare_disk(cfg: &DeviceConfig, disk: &Disk, slot: Option<Slot>) -> Result<()> {
+    services::stop_all(&cfg.services)?;
     wipe::release_data().context("close the data partition")?;
     if let Some(slot) = slot {
         skyward_vab::unmount_partitions(slot).context("unmap the installed system's logical partitions")?;

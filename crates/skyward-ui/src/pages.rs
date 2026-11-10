@@ -2382,17 +2382,16 @@ pub fn disk_maintenance(cx: &Ctx) -> Frame {
             let y = widgets::info_card(&mut c, t, f, y, &[(name, status)]);
             if !work.running {
                 let y = widgets::section(&mut c, t, f, y, l.pick(["重启", "重新啟動", "Restart"]));
-                let rows = [
-                    Row::new(l.pick(["重启到 Recovery", "重新啟動到 Recovery", "Restart to recovery"])).icon(ORANGE, Icon::Power),
-                    Row::new(l.pick(["重启到系统", "重新啟動到系統", "Restart to system"])).icon(ORANGE, Icon::Power),
-                    Row::new(l.pick(["关机", "關機", "Power off"])).icon(RED, Icon::Power),
-                ];
+                let rows: Vec<Row> = REBOOT_TARGETS.iter().map(|(title, sub)| {
+                    let row = Row::new(l.pick(*title)).icon(if *title == REBOOT_TARGETS[5].0 { RED } else { ORANGE }, Icon::Power);
+                    match sub {
+                        Some(sub) => row.subtitle(l.pick(*sub)),
+                        None => row,
+                    }
+                }).collect();
                 let choices = widgets::list(&mut c, t, f, y, &rows);
-                out.extend(hits(&choices.rows, &[
-                    Action::RebootTo(Target::Recovery),
-                    Action::RebootTo(Target::System),
-                    Action::RebootTo(Target::PowerOff),
-                ]));
+                let actions: Vec<Action> = TARGETS.iter().map(|&target| Action::RebootTo(target)).collect();
+                out.extend(hits(&choices.rows, &actions));
                 widgets::footnote(&mut c, t, f, choices.bottom, l.pick(["按音量键选择，按电源键确认。", "按音量鍵選擇，按電源鍵確認。", "Choose with the volume keys and confirm with the power key."]));
             }
         }
