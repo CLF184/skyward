@@ -9738,14 +9738,21 @@ mod tests {
     #[test]
     fn every_unfinished_entry_now_opens_its_page() {
         let (f, i) = (fonts(), DeviceInfo { slot: Some(Slot::B), ..info() });
-        let routes: [(Screen, Screen); 13] = [
+        let routes: [(Screen, Screen); 17] = [
             (Screen::Home, Screen::Search),
             (Screen::Home, Screen::Backup),
             (Screen::Home, Screen::Restore),
             (Screen::Home, Screen::Advanced),
+            // Every row the Advanced page draws, which is the page whose last
+            // row was once drawn and given no action: it was there to touch
+            // and did nothing.
             (Screen::Advanced, Screen::Files),
             (Screen::Advanced, Screen::Terminal),
+            (Screen::Advanced, Screen::Relabel),
+            (Screen::Advanced, Screen::Filesystems),
             (Screen::Advanced, Screen::Logs),
+            (Screen::Advanced, Screen::Update),
+            (Screen::Advanced, Screen::Avb),
             (Screen::Settings, Screen::Language),
             (Screen::Settings, Screen::TimeZone),
             (Screen::Settings, Screen::Terminal),

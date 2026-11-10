@@ -216,6 +216,10 @@ fn fit(c: Canvas, t: &Theme, bottom: f32) -> Canvas {
 }
 
 fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
+    // One action for each row, and no row without one: a list given one
+    // action fewer than it draws leaves its last row dead, which is a control
+    // that does nothing when it is touched and says nothing about why.
+    assert_eq!(rects.len(), actions.len(), "a list draws {} rows and was given {} actions", rects.len(), actions.len());
     rects.iter().zip(actions).map(|(&rect, &action)| Hit { rect, action }).collect()
 }
 
@@ -2374,6 +2378,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Update),
+        Action::Open(Screen::Avb),
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
 }
