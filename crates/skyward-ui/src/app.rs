@@ -3458,10 +3458,11 @@ impl App {
         }
     }
 
-    /// Where the switch `switch` stands, 0 or 1: what a touch turns it
-    /// away from.
+    /// Where the switch `switch` is drawn right now, 0 or 1 where it stands
+    /// still and somewhere between while it turns: what a touch turns it away
+    /// from, so that a switch caught mid-turn carries on from there.
     fn switch_level(&self, switch: Switch) -> f32 {
-        if self.switch_on(switch) { 1.0 } else { 0.0 }
+        self.switch_shown(switch, self.now)
     }
 
     /// What the AVB page's read found, and what the write before it said.
