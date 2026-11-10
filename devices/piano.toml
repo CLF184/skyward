@@ -51,9 +51,9 @@ product_id = 0x9039
 [disk.gpt]
 disks = ["sda", "sdb", "sdc", "sdd", "sde", "sdf"]
 prepare_script = { source = "../resources/piano/piano-fixgpt-unmount.sh", path = "/piano/bin/piano-fixgpt-unmount.sh" }
-gdisk = { source = "../resources/piano/gdisk", path = "/system/bin/gdisk", sha256 = "3ecffce384482b47fc76742f404a125c652a892f3f370603e9023eb06ee56751" }
-dmctl = { source = "../resources/piano/dmctl", path = "/system/bin/dmctl", sha256 = "c6fa26b4b199eb1ee1798cdf71d2c34659d4ca6ecfa7d2d3686637c2900454cb" }
-uuid_library = { source = "../resources/piano/libext2_uuid.so", path = "/system/lib64/libext2_uuid.so", sha256 = "a0560f406c35679ce9c0c644b243dd9588f83e05f8dbed4128604c182b4b197f" }
+gdisk = { source = "../resources/piano/gdisk", path = "/system/bin/gdisk" }
+dmctl = { source = "../resources/piano/dmctl", path = "/system/bin/dmctl" }
+uuid_library = { source = "../resources/piano/libext2_uuid.so", path = "/system/lib64/libext2_uuid.so" }
 input = "x\nj\n\nk\n\nw\nY\n"
 success = "The operation has completed successfully."
 
