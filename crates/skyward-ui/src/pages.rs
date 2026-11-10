@@ -80,6 +80,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::RestoreBackup => restore_backup(cx),
         Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
+        Screen::Avb => avb(cx),
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
@@ -117,6 +118,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
 pub fn confirm_label(which: Confirm, s: &State) -> (&'static str, bool) {
     const INSTALL: Text = ["滑动以安装", "滑動以安裝", "Slide to install"];
     let (label, danger) = match which {
+        Confirm::Avb => (["滑动以修改 vbmeta", "滑動以變更 vbmeta", "Slide to change vbmeta"], true),
         Confirm::Filesystem => match s.fs_action {
             FsAction::Repair => (["滑动以修复", "滑動以修復", "Slide to repair"], true),
             FsAction::Remake(_) => (["滑动以更换", "滑動以更換", "Slide to change"], true),
@@ -172,6 +174,8 @@ const LOGS: Text = ["导出日志", "匯出記錄", "Export logs"];
 const SCREEN_TIMEOUT: Text = ["息屏时间", "螢幕自動關閉", "Screen timeout"];
 const ALWAYS_ON: Text = ["息屏显示", "螢幕關閉顯示", "Always-on display"];
 const DOUBLE_TAP: Text = ["双击亮屏", "連點兩下亮屏", "Double-tap to wake"];
+const REMEMBER_PASSWORD: Text = ["记住解密密码", "記住解密密碼", "Remember the decrypt password"];
+const AVB: Text = ["AVB 校验", "AVB 驗證", "AVB verification"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
 const SKYWARD_UPDATE: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
@@ -442,6 +446,20 @@ pub fn settings(cx: &Ctx) -> Frame {
         "When on, a computer can manage the files in internal storage, once it is decrypted.",
     ]);
     y = widgets::footnote(&mut c, t, f, usb.bottom, note);
+    // A password kept on the phone is a password someone else may read,
+    // so it is asked for rather than given, and the row says what it costs.
+    if s.data != Data::Erased {
+        let remember = widgets::section(&mut c, t, f, y, l.pick(["解密", "解密", "Decryption"]));
+        let row = Row::new(l.pick(REMEMBER_PASSWORD)).trail(Trail::Switch(s.remember_password));
+        let rows = widgets::list(&mut c, t, f, remember, &[row]);
+        out.extend(hits(&rows.rows, &[Action::Toggle(Switch::RememberPassword)]));
+        let note = l.pick([
+            "开启后，成功解密 data 的密码会保存在本机密文存储中，下次进入 recovery 自动尝试。密码改过或关闭开关即失效。",
+            "開啟後，成功解密 data 的密碼會儲存在本機的加密儲存空間，下次進入 recovery 自動嘗試。密碼改過或關閉開關即失效。",
+            "When on, the password that opens the data partition is kept on this phone and tried by itself at the next start. Changing the password or turning this off forgets it.",
+        ]);
+        y = widgets::footnote(&mut c, t, f, rows.bottom, note);
+    }
     y = widgets::section(&mut c, t, f, y, l.pick(["调试", "偵錯", "Debugging"]));
     let debug = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal)]);
     out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal)]));
@@ -1060,6 +1078,24 @@ pub fn install(cx: &Ctx) -> Frame {
         ]);
         y = widgets::footnote(&mut c, t, f, options.bottom, note);
     }
+    // The recovery's own act after an install, not the package's: a ROM
+    // built without this phone's keys will not start on a bootloader that
+    // still checks signatures, and an install script is an arbitrary
+    // program that may or may not disable them for itself.
+    let avb = Row::new(l.pick([
+        "刷入 ROM 后自动禁用 AVB 校验",
+        "刷入 ROM 後自動停用 AVB 驗證",
+        "Disable AVB checks after a ROM is installed",
+    ]))
+    .trail(Trail::Switch(cx.state.disable_avb));
+    let rows = widgets::list(&mut c, t, f, y + t.m.card_gap, &[avb]);
+    out.extend(hits(&rows.rows, &[Action::Toggle(Switch::DisableAvb)]));
+    let note = l.pick([
+        "安装完成后，本次安装所在槽位的启动验证与 dm-verity 会被关闭，重启后生效。原镜像备份在 /tmp。",
+        "安裝完成後，本次安裝所在槽位的啟動驗證與 dm-verity 會被停用，重新啟動後生效。原映像檔備份在 /tmp。",
+        "After the install, boot verification and dm-verity are turned off in the slot it installed to, from the next start. The image as it was is kept in /tmp.",
+    ]);
+    let y = widgets::footnote(&mut c, t, f, rows.bottom, note);
     Frame::new(t, fit(c, t, y), out, l.pick(["安装", "安裝", "Install"]), top)
 }
 
@@ -2329,6 +2365,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
+        Row::new(l.pick(AVB)).icon(RED, Icon::Shield),
     ]);
     let out = hits(&tools.rows, &[
         Action::Open(Screen::Files),
@@ -2342,6 +2379,89 @@ pub fn advanced(cx: &Ctx) -> Frame {
 }
 
 const RELABEL: Text = ["修复 SELinux 上下文", "修復 SELinux 上下文", "Fix SELinux contexts"];
+
+/// The two AVB checks, what each does, and the switch that turns it off.
+pub fn avb(cx: &Ctx) -> Frame {
+    use skyward_install::commands::avbctl::Check;
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let top = t.m.content_top;
+    let mut out = Vec::new();
+    let mut y = top;
+    let state = match &s.avb {
+        Some(Ok(state)) => Some(state),
+        Some(Err(why)) => {
+            y = widgets::footnote(&mut c, t, f, y, why);
+            None
+        }
+        None => {
+            y = widgets::footnote(&mut c, t, f, y, l.pick(["正在读取 vbmeta", "正在讀取 vbmeta", "Reading vbmeta"]));
+            None
+        }
+    };
+    if let Some(state) = state {
+        let target = if state.suffix.is_empty() { "vbmeta".to_string() } else { format!("vbmeta{}", state.suffix) };
+        y = widgets::info_card(&mut c, t, f, y, &[
+            (l.pick(["目标分区", "目標分割區", "Target partition"]), target),
+            (
+                l.pick(["引导器", "引導器", "Bootloader"]),
+                l.pick(["已解锁", "已解鎖", "Unlocked"]).to_string(),
+            ),
+        ]);
+        let rows: Vec<Row> = [
+            (
+                Check::Verification,
+                l.pick(["启动验证", "啟動驗證", "Boot verification"]),
+                l.pick(["引导器校验各分区的签名", "引導器驗證各分割區的簽章", "The bootloader checks each partition's signature"]),
+            ),
+            (
+                Check::Verity,
+                "dm-verity",
+                l.pick(["读取时逐块校验分区内容", "讀取時逐塊驗證分割區內容", "Each block is checked as it is read"]),
+            ),
+        ]
+        .iter()
+        .map(|(check, label, what)| {
+            let disabled = match &s.avb_pending {
+                Some((_, pending, want)) if pending == check => !*want,
+                _ => state.disabled(*check),
+            };
+            Row::new(label).subtitle(what).trail(Trail::Switch(!disabled))
+        })
+        .collect();
+        let list = widgets::list(&mut c, t, f, y, &rows);
+        out.extend(hits(&list.rows, &[Action::AvbToggle(Check::Verification), Action::AvbToggle(Check::Verity)]));
+        y = list.bottom;
+        let explain = l.pick([
+            "关闭后，安装了非官方系统的手机才能正常启动。改动只写入当前槽位的 vbmeta，重启后生效；写入前原镜像会备份到 /tmp。",
+            "停用後，安裝了非官方系統的手機才能正常啟動。變更只寫入目前槽位的 vbmeta，重新啟動後生效；寫入前原映像檔會備份到 /tmp。",
+            "Turning these off is what lets a phone start a system that was not signed with its own keys. Only this slot's vbmeta is written, from the next start; the image as it was is kept in /tmp.",
+        ]);
+        y = widgets::footnote(&mut c, t, f, y, explain);
+        if let Some((_, check, want)) = &s.avb_pending {
+            let name = match check {
+                Check::Verification => l.pick(["启动验证", "啟動驗證", "Boot verification"]),
+                Check::Verity => "dm-verity",
+            };
+            let said = match want {
+                true => tr!(l, "将关闭 {name}", "將停用 {name}", "Turn off {name}"),
+                false => tr!(l, "将开启 {name}", "將啟用 {name}", "Turn on {name}"),
+            };
+            y = widgets::footnote(&mut c, t, f, y, &said);
+            let (label, danger) = confirm_label(Confirm::Avb, cx.state);
+            let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+            out.push(Hit { rect: track, action: Action::Confirm(Confirm::Avb) });
+            y = track.y + track.h;
+            let cancel = widgets::button(&mut c, t, f, y + t.m.dp(12.0), l.pick(["取消", "取消", "Cancel"]));
+            out.push(Hit { rect: cancel, action: Action::CancelAvb });
+            y = cancel.y + cancel.h;
+        }
+        if let Some(notice) = &s.avb_notice {
+            y = widgets::footnote(&mut c, t, f, y, notice);
+        }
+    }
+    Frame::new(t, fit(c, t, y), out, l.pick(AVB), top)
+}
 const FILESYSTEMS: Text = ["文件系统", "檔案系統", "Filesystems"];
 const STOPPED: Text = ["已停止", "已停止", "Stopped"];
 const STOPPING: Text = ["正在停止", "正在停止", "Stopping"];

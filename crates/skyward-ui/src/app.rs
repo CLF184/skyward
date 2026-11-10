@@ -20,6 +20,7 @@ use crate::theme::Theme;
 use crate::tr;
 use crate::widgets::{self, Bar, Bolt, Cap, Layer, WlanMark};
 use skyward_info::DeviceInfo;
+use skyward_install::commands::avbctl;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::{Failure, Progress};
 use skyward_net::github::{Build, Newest};
@@ -62,6 +63,9 @@ pub enum Screen {
     BackupJob,
     /// Tools for the experienced: files, a terminal, the logs.
     Advanced,
+    /// The AVB checks of the slot the phone runs from: what they are,
+    /// and turning them on or off.
+    Avb,
     Files,
     /// One file, and what can be done with it.
     FileInfo,
@@ -556,6 +560,10 @@ pub enum Switch {
     /// Write Skyward back into the recovery partitions an install writes
     /// over.
     KeepRecovery,
+    /// Turn both AVB checks off after a ROM is installed.
+    DisableAvb,
+    /// Remember the screen lock that opens the data partition.
+    RememberPassword,
     Wlan,
     /// Show the clock and the phone's readings on a dark panel, in the
     /// panel's own doze, rather than putting the panel out.
@@ -850,6 +858,8 @@ impl Data {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Confirm {
+    /// Change an AVB check on the slot the phone runs from.
+    Avb,
     Reboot,
     Wipe,
     Flash,
@@ -1168,6 +1178,11 @@ pub const TIME_ZONES: [(Text, Text, &str); 9] = [
 /// What a control does when touched.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    /// Ask to turn one AVB check on or off; a second call on the same
+    /// check takes the request back.
+    AvbToggle(avbctl::Check),
+    /// Take back a request to change vbmeta.
+    CancelAvb,
     Open(Screen),
     /// Leave the decrypt page for the page it was opened from; the page
     /// the recovery started on, for the home page without keeping it
@@ -1585,6 +1600,15 @@ impl Frame {
 /// stands.
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
+    /// What the AVB page last read: none before its first read, and why
+    /// where it could not be read.
+    pub avb: Option<Result<avbctl::State, String>>,
+    /// A check the page was asked to change, with the state it was asked
+    /// to change it in: the write refuses unless that is still what the
+    /// slot holds.
+    pub avb_pending: Option<(avbctl::State, avbctl::Check, bool)>,
+    /// What the last write said, once it ended.
+    pub avb_notice: Option<String>,
     /// The language the pages speak.
     pub lang: Lang,
     /// The language was chosen on the language page, now or at an earlier
@@ -1652,6 +1676,19 @@ pub struct State {
     /// Skyward goes back into the recovery partitions an install writes
     /// over.
     pub keep_recovery: bool,
+    /// Turn both AVB checks off after a ROM is installed, so that a system
+    /// built without this phone's keys can start on a bootloader that
+    /// would otherwise refuse it. Off unless asked for: it is a change to
+    /// the signature the bootloader checks, not to what an install writes.
+    pub disable_avb: bool,
+    /// Remember the screen lock once it opens the data partition, and try
+    /// it by itself at the next start. Off unless asked for, because a
+    /// password kept on the phone is a password someone else may read.
+    pub remember_password: bool,
+    /// The last credential this phone accepted, where remembering is on.
+    /// Held so that the decrypt page can offer it, and dropped when it is
+    /// turned off or the phone forgets it.
+    pub remembered: Option<String>,
     /// How Skyward went back into the recovery partitions the install
     /// wrote over, where it did.
     pub reflash: Option<Reflash>,
@@ -1792,6 +1829,9 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         State {
+            avb: None,
+            avb_pending: None,
+            avb_notice: None,
             lang: Lang::Hans,
             language_chosen: false,
             dark: false,
@@ -1823,6 +1863,9 @@ impl Default for State {
             check_signature: false,
             recovery_partitions: false,
             keep_recovery: true,
+            disable_avb: false,
+            remember_password: false,
+            remembered: None,
             reflash: None,
             mounts: Ok(Vec::new()),
             mount_failure: None,
@@ -2027,6 +2070,14 @@ pub enum Shot {
 /// Work the runtime carries out on the UI's behalf.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
+    /// Read the AVB checks of the slot the phone runs from, telling the
+    /// page with `App::avb_read`.
+    ReadAvb,
+    /// Change one AVB check, having confirmed that the slot still holds
+    /// what the page showed.
+    SetAvb { expected: avbctl::State, check: avbctl::Check, disabled: bool },
+    /// Remember the screen lock just typed, or forget the one remembered.
+    RememberPassword(Option<String>),
     Reboot(Target),
     /// A short tap of the vibration motor.
     Haptic,
@@ -3324,6 +3375,27 @@ impl App {
     /// Something laid over the page changed (the clock): compose again.
     pub fn redraw(&mut self) {
         self.dirty = true;
+    }
+
+    /// A credential that opened the phone's files, to be written down
+    /// where the owner asked for it to be kept.
+    pub fn keep_password(&mut self, code: String) -> Vec<Effect> {
+        self.state.remembered = Some(code.clone());
+        vec![Effect::RememberPassword(Some(code))]
+    }
+
+    /// What an earlier start kept, for the decrypt page to offer.
+    pub fn remembered(&mut self, code: Option<String>) {
+        self.state.remembered = code;
+        self.refresh();
+    }
+
+    /// What the AVB page's read found, and what the write before it said.
+    pub fn avb_read(&mut self, state: Result<avbctl::State, String>, notice: Option<String>) {        self.state.avb = Some(state);
+        self.state.avb_pending = None;
+        self.state.avb_notice = notice;
+        self.state.confirm = 0.0;
+        self.refresh();
     }
 
     /// The settings the pages show, as they are kept between starts.
@@ -5147,6 +5219,29 @@ impl App {
                 _ => {}
             },
             Event::Reflashed(reflash) => self.state.reflash = Some(reflash),
+            Event::Avb(avb) => {
+                // What the install's own AVB step did, said where the install
+                // says how it went. A phone whose checks were left on because
+                // this failed is the one the owner has to know about.
+                let slot = avb.slot.map(|s| s.letter()).unwrap_or("?");
+                let said = match avb.done {
+                    Ok(None) => tr!(self.state.lang, "{slot} 槽的 AVB 校验本来就是关闭的", "{slot} 槽的 AVB 驗證本來就是關閉的", "The AVB checks of slot {slot} were already off"),
+                    Ok(Some(backup)) => tr!(
+                        self.state.lang,
+                        "{slot} 槽的 AVB 校验已关闭，重启后生效。原镜像备份：{backup}",
+                        "{slot} 槽的 AVB 驗證已停用，重新啟動後生效。原映像檔備份：{backup}",
+                        "The AVB checks of slot {slot} are off, from the next start. The image as it was is kept at {backup}"
+                    ),
+                    Err(why) => tr!(
+                        self.state.lang,
+                        "{slot} 槽的 AVB 校验没有改动：{why}",
+                        "{slot} 槽的 AVB 驗證沒有變更：{why}",
+                        "The AVB checks of slot {slot} were left as they were: {why}"
+                    ),
+                };
+                self.state.avb_notice = Some(said);
+                self.refresh();
+            }
             Event::Wipe | Event::Reboot(_) => unreachable!("the runtime carries out what rescue asks of it"),
             Event::Done(outcome) | Event::Finished(outcome) => {
                 let damage = match (&outcome, &*install) {
@@ -5175,6 +5270,14 @@ impl App {
     /// how it learns which control a user's screen lock is answered with.
     fn arrive_at(&mut self, s: Screen) -> Vec<Effect> {
         match s {
+            Screen::Avb => {
+                // Read afresh each time it opens: a zip may have flashed a
+                // vbmeta image since the page was last looked at.
+                self.state.avb = None;
+                self.state.avb_pending = None;
+                self.state.avb_notice = None;
+                vec![Effect::ReadAvb]
+            }
             Screen::Mount => vec![Effect::ReadMounts],
             Screen::Filesystems => vec![Effect::ReadFilesystems],
             Screen::Slot | Screen::Reboot => vec![Effect::ReadSlots],
@@ -5294,6 +5397,8 @@ impl App {
                     Switch::Verify => &mut self.state.verify,
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
+                    Switch::DisableAvb => &mut self.state.disable_avb,
+                    Switch::RememberPassword => &mut self.state.remember_password,
                     Switch::ShowPassword => &mut self.state.show_password,
                     Switch::AlwaysOn => &mut self.state.always_on,
                     Switch::DoubleTap => &mut self.state.double_tap,
@@ -5301,6 +5406,9 @@ impl App {
                 };
                 *on = !*on;
                 let now_on = *on;
+                if switch == Switch::RememberPassword && !now_on {
+                    self.state.remembered = None;
+                }
                 self.refresh();
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
@@ -5334,6 +5442,27 @@ impl App {
                     }
                     (false, _) => self.state.wipe[k] = false,
                 }
+                self.refresh();
+            }
+            Action::AvbToggle(check) => {
+                // The request is only held here; it is written after the
+                // page's own swipe agrees to it, so that a stray touch on a
+                // row cannot change what the bootloader checks.
+                if let Some(Ok(state)) = self.state.avb.clone() {
+                    if state.unlocked {
+                        self.state.avb_pending = match &self.state.avb_pending {
+                            Some((_, pending, _)) if *pending == check => None,
+                            _ => Some((state.clone(), check, !state.disabled(check))),
+                        };
+                        self.state.avb_notice = None;
+                        self.state.confirm = 0.0;
+                        self.refresh();
+                    }
+                }
+            }
+            Action::CancelAvb => {
+                self.state.avb_pending = None;
+                self.state.confirm = 0.0;
                 self.refresh();
             }
             Action::Confirm(_) => self.say(l.pick(["请按住圆形按钮向右滑动", "請按住圓形按鈕向右滑動", "Hold the round button and slide it right"]), now),
@@ -6649,6 +6778,15 @@ impl App {
             Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
             // The partition has to be open; whether its users have unlocked
             // their own files makes no difference.
+            Confirm::Avb => {
+                // The write refuses unless the slot still holds what the page
+                // showed, and unless the bootloader is unlocked; both are
+                // checked again where the write is made.
+                match self.state.avb_pending.take() {
+                    Some((expected, check, disabled)) => fx.push(Effect::SetAvb { expected, check, disabled }),
+                    None => self.say(l.pick(["没有待确认的改动", "沒有待確認的變更", "There is no change to confirm"]), now),
+                }
+            }
             Confirm::Relabel => match self.state.data {
                 Data::Open | Data::Locked { .. } => fx.push(Effect::Relabel),
                 Data::Opening => self.say(l.pick(DATA_OPENING), now),
@@ -8227,6 +8365,72 @@ mod tests {
         assert!(app.state.always_on, "the switch turns it on");
         app.act(Action::Toggle(Switch::AlwaysOn), 2000);
         assert!(!app.state.always_on, "and off again");
+    }
+
+    #[test]
+    fn the_avb_page_reads_before_it_shows_and_only_writes_after_the_swipe() {
+        use skyward_install::commands::avbctl;
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        // Opening it reads the slot afresh, because a zip may have
+        // flashed a vbmeta image since the page was last looked at.
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Avb)), vec![Effect::ReadAvb]);
+        let state = avbctl::State { suffix: "_a".into(), flags: 0, unlocked: true, digest: [0; 32] };
+        app.avb_read(Ok(state.clone()), None);
+        // A touch on a row only holds the request: nothing is written
+        // until the page's own swipe agrees to it.
+        let saved = app.settings();
+        assert!(tap(&mut app, &f, &i, Action::AvbToggle(avbctl::Check::Verification)).is_empty());
+        assert_eq!(app.settings(), saved, "a pending change is not a saved setting");
+        assert_eq!(app.state.avb, Some(Ok(state.clone())), "and does not claim a disk change");
+        tap(&mut app, &f, &i, Action::CancelAvb);
+        assert!(app.state.avb_pending.is_none(), "the request can be taken back");
+        tap(&mut app, &f, &i, Action::AvbToggle(avbctl::Check::Verification));
+        assert_eq!(
+            swipe(&mut app, &f, &i, Confirm::Avb),
+            vec![Effect::SetAvb { expected: state, check: avbctl::Check::Verification, disabled: true }]
+        );
+        assert!(app.state.avb_pending.is_none(), "and the request is spent");
+    }
+
+    #[test]
+    fn an_avb_state_that_could_not_be_read_or_is_locked_offers_no_write() {
+        use skyward_install::commands::avbctl;
+        let (f, i) = (fonts(), info());
+        for unreadable in [Err("cannot read vbmeta".to_string()), Ok(avbctl::State { suffix: "_a".into(), flags: 0, unlocked: false, digest: [0; 32] })] {
+            let mut app = App::new(Screen::Avb, W, H, PPD);
+            let locked = matches!(&unreadable, Ok(s) if !s.unlocked);
+            app.avb_read(unreadable, None);
+            assert!(tap(&mut app, &f, &i, Action::AvbToggle(avbctl::Check::Verity)).is_empty());
+            assert!(app.state.avb_pending.is_none(), "a locked bootloader changes nothing from the page");
+            assert!(locked || app.state.avb.as_ref().is_some_and(|r| r.is_err()));
+        }
+    }
+
+    #[test]
+    fn installing_a_rom_honours_the_avb_switch_and_it_is_saved() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        assert!(!app.state.disable_avb, "a ROM is installed without turning the checks off");
+        assert!(tap(&mut app, &f, &i, Action::Toggle(Switch::DisableAvb)).is_empty());
+        assert!(app.state.disable_avb);
+        let saved = crate::settings::Settings::of(&app.state);
+        let mut next = State::default();
+        saved.apply(&mut next);
+        assert!(next.disable_avb, "and the choice is kept for the next start");
+    }
+
+    #[test]
+    fn turning_remembering_off_forgets_the_credential_it_held() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Settings, &f, &i);
+        app.state.remember_password = true;
+        app.state.remembered = Some("1234".into());
+        // Off: what was held is dropped, and the runtime is told to take
+        // the sealed file away with it.
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::RememberPassword)), vec![Effect::RememberPassword(None)]);
+        assert!(app.state.remembered.is_none(), "the credential goes with the switch");
+        assert!(!app.state.remember_password);
     }
 
     #[test]

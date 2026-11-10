@@ -1072,7 +1072,14 @@ fn detach(services: Vec<Service>) -> Detach {
 /// on a phone that has them, and checks a zip's signature before its
 /// install script runs.
 fn install_options(app: &App) -> Options {
-    Options { keep: app.state.keep_recovery && app.state.recovery_partitions, signed: app.state.check_signature }
+    Options {
+        keep: app.state.keep_recovery && app.state.recovery_partitions,
+        signed: app.state.check_signature,
+        // The system asking for an update never does this: no one is at
+        // the screen to have asked for it, and the install refuses it
+        // on that origin besides.
+        disable_avb: app.state.disable_avb,
+    }
 }
 
 /// How often the WLAN page scans while it shows.
@@ -1246,6 +1253,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // the panel can doze: the taps are only felt while the panel stays in its
     // doze, so a phone with no doze of its own has no way to offer them.
     app.state.panel_taps = cfg.touch.double_tap && app.state.panel_dozes;
+    // The credential an earlier start kept, where remembering is on: offered
+    // on the decrypt page, and tried by the page's own open where it can be.
+    // A phone that turned remembering off, or forgot it, has none.
+    app.state.remembered = if app.state.remember_password { crate::remembered::load() } else { None };
+    if app.state.remember_password && app.state.remembered.is_none() {
+        // Remembering is on and nothing is kept: a wiped /metadata, or a
+        // credential sealed by a phone that is not this one.
+        let _ = skyward_sys::kmsg("remembering the decrypt password is on, and no credential is kept");
+    }
     // When the panel gone dark began to rest.
     let mut rested_at: Option<Instant> = None;
     // When the panel went dark, which is what the phone's sleep waits out: a
@@ -1258,6 +1274,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Whether the panel was dark the last time the readings were told how
     // often to look, so that they are told only when that changes.
     let mut was_dark = false;
+    // The credential just typed, held until the phone says whether it opened
+    // anything: a password a phone turns down is not one to write down.
+    let mut unlock_typed: Option<(u32, String)> = None;
     // Started for fastboot, the port goes to the phone's own fastbootd. The
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
@@ -2323,6 +2342,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 decrypt::Ended::Unlocked(Ok(still)) => {
                     closed = still;
                     show_closed(&mut app, &closed)?;
+                    // What was typed opened the phone's files, so it is the
+                    // credential to keep where the owner asked for it to be
+                    // kept. A second space's password is not the owner's, and
+                    // is not kept.
+                    if let Some((user, code)) = unlock_typed.take() {
+                        if user == 0 && app.state.remember_password && app.state.remembered.as_deref() != Some(code.as_str()) {
+                            app.keep_password(code);
+                        }
+                    }
                 }
                 decrypt::Ended::Unlocked(Err(why)) => {
                     // Which user the credential was for, so that a page
@@ -2576,9 +2604,68 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::Unlock { user, code } => {
                         ensure!(decryptor.is_none(), "the data partition is being opened already");
-                        let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential: code.into_bytes() };
+                        let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential: code.clone().into_bytes() };
                         decryptor = Some(Decryptor::start(job)?);
+                        // Kept only once it opens: what a phone is given that
+                        // it turns down is not a credential to write down.
+                        unlock_typed = Some((user, code));
                     }
+                    Effect::ReadAvb => {
+                        app.avb_read(skyward_install::commands::avbctl::current().map_err(|e| e.to_string()), None);
+                    }
+                    Effect::SetAvb { expected, check, disabled } => {
+                        use skyward_install::commands::avbctl;
+                        // Nothing else may be writing partitions while vbmeta
+                        // is changed: an install may be flashing the very
+                        // image this is about to rewrite.
+                        let busy = installer.is_some()
+                            || part_worker.is_some()
+                            || eraser.is_some()
+                            || backuper.is_some()
+                            || skyward_updater.is_some();
+                        if busy {
+                            let said = app.state.lang.pick([
+                                "其他分区操作尚未结束，暂不能修改 AVB。",
+                                "其他分割區操作尚未結束，暫不能變更 AVB。",
+                                "Another partition operation is active; AVB cannot be changed yet.",
+                            ]);
+                            app.avb_read(avbctl::current().map_err(|e| e.to_string()), Some(said.into()));
+                            continue;
+                        }
+                        let (state, notice) = match avbctl::change(&expected, check, disabled) {
+                            Ok((state, backup)) => {
+                                let said = match backup.to_str() {
+                                    Some(path) => {
+                                        format!("{} {path}", app.state.lang.pick(["已写入并校验，重启后生效。原镜像：", "已寫入並驗證，重新啟動後生效。原映像檔：", "Written and verified; effective after the next start. The image as it was:"]))
+                                    }
+                                    None => app.state.lang.pick(["已写入并校验，重启后生效。", "已寫入並驗證，重新啟動後生效。", "Written and verified; effective after the next start."]).to_string(),
+                                };
+                                (Ok(state), said)
+                            }
+                            Err(e) => {
+                                let said = format!(
+                                    "{}: {e}",
+                                    app.state.lang.pick(["修改失败，请核对当前状态", "修改失敗，請核對目前狀態", "The change failed; check the state it is in now"])
+                                );
+                                (avbctl::current().map_err(|e| e.to_string()), said)
+                            }
+                        };
+                        app.avb_read(state, Some(notice));
+                    }
+                    Effect::RememberPassword(code) => match code {
+                        Some(credential) => match crate::remembered::save(&credential) {
+                            Ok(()) => app.state.remembered = Some(credential),
+                            Err(e) => {
+                                let _ = skyward_sys::kmsg(&format!("the credential is not kept: {e:#}"));
+                            }
+                        },
+                        None => {
+                            app.state.remembered = None;
+                            if let Err(e) = crate::remembered::forget() {
+                                let _ = skyward_sys::kmsg(&format!("the kept credential is not removed: {e:#}"));
+                            }
+                        }
+                    },
                     Effect::ReadDir(folder) => list(&mut app, folder, &closed)?,
                     Effect::ReadPlace(place, folder) => list_place(&mut app, place, folder)?,
                     // A name taken where an entry goes is the user's to

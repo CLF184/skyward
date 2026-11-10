@@ -15,7 +15,7 @@ use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
 use crate::script::{self, Bar, Request};
 use crate::signature::{self, Verdict};
-use crate::{Command, Event, Failure, Options, Outcome, Reflash, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
+use crate::{Avb, Command, Event, Failure, Options, Outcome, Reflash, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
 use skyward_sys::{kmsg, prop};
 use skyward_vab::{Slot, SlotMaps, SnapshotState};
@@ -649,6 +649,17 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
             if let Some(kept) = &kept {
                 reflash(ctx, kept, Ok(slot.other()));
             }
+            // An update package installs to the other slot and switches to
+            // it, so that is where the checks have to come off for the new
+            // system to start. As with a script, the system asking for the
+            // update is not the owner asking for this.
+            if ctx.options.disable_avb && !matches!(ctx.origin, Origin::Asked { .. }) {
+                // The screen is told either way; an update that went in is
+                // not failed over the checks being left on.
+                if let Err(e) = post_avb(ctx, Ok(slot.other())) {
+                    let _ = kmsg(&format!("install: the AVB checks are not written: {e:#}"));
+                }
+            }
             Done::Decided(Outcome::Installed { slot: slot.other(), wipe })
         }
         code => Done::Engine(code),
@@ -914,7 +925,39 @@ fn run_script<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done>
         reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"));
     }
     let (code, wipe_cache) = ran?;
+    // A ROM flashed without the phone's keys will not start on a locked
+    // bootloader, so the checks go off after a script that ended cleanly, in
+    // the slot the phone will start from next. An install the system asked
+    // for never does this: no one is at the screen to have asked for it.
+    if code == 0 && ctx.options.disable_avb && !matches!(ctx.origin, Origin::Asked { .. }) {
+        // The package is written and the phone is otherwise ready: a check
+        // left on is something the owner can change from the AVB page, not a
+        // reason to call a finished install failed.
+        if let Err(e) = post_avb(ctx, skyward_vab::boot::next_slot().context("ask which slot the phone starts from next")) {
+            let _ = kmsg(&format!("install: the AVB checks are not written: {e:#}"));
+        }
+    }
     Ok(Done::Script { code, wipe_cache })
+}
+
+/// Turn both AVB checks off in `slot`, telling the screen what happened.
+///
+/// Failing does not fail the install: the package is written and the phone is
+/// otherwise ready, and a check left on is something the owner can change
+/// from the AVB page afterwards. What went wrong is said, so that a phone
+/// that will not start is not a mystery.
+fn post_avb(ctx: &mut Context, slot: Result<skyward_vab::Slot>) -> Result<()> {
+    let slot = match slot {
+        Ok(slot) => slot,
+        Err(e) => {
+            ctx.send(Event::Avb(Avb { slot: None, done: Err(format!("{e:#}")) }));
+            return Ok(());
+        }
+    };
+    let outcome = crate::commands::avbctl::disable_slot(slot).map_err(|e| format!("{e}"));
+    let done = outcome.map(|backup| backup.map(|b| b.display().to_string()));
+    ctx.send(Event::Avb(Avb { slot: Some(slot), done }));
+    Ok(())
 }
 
 /// Check the zip being served, `size` bytes, was signed with one of the
