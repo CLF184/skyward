@@ -246,6 +246,10 @@ pub struct Gpt {
     pub dmctl: DiskResource,
     /// The UUID library gdisk loads.
     pub uuid_library: DiskResource,
+    /// GNU Parted, used to print the partition table.
+    pub parted: DiskResource,
+    /// The shared libraries GNU Parted loads.
+    pub parted_libraries: Vec<DiskResource>,
     /// Input sent to gdisk for the tested repair sequence.
     pub input: String,
     /// Text gdisk prints when the repair completed.
@@ -776,8 +780,10 @@ impl DeviceConfig {
                 &disk.gpt.gdisk,
                 &disk.gpt.dmctl,
                 &disk.gpt.uuid_library,
+                &disk.gpt.parted,
             ]
             .into_iter()
+            .chain(disk.gpt.parted_libraries.iter())
             .chain(disk.gpt.prepare_script.iter())
             {
                 let plain = resource.path.strip_prefix('/').is_some_and(|path| {

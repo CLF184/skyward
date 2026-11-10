@@ -133,8 +133,10 @@ fn main() -> Result<()> {
                     (&disk.gpt.gdisk, 0o755),
                     (&disk.gpt.dmctl, 0o755),
                     (&disk.gpt.uuid_library, 0o644),
+                    (&disk.gpt.parted, 0o755),
                 ]
                 .into_iter()
+                .chain(disk.gpt.parted_libraries.iter().map(|library| (library, 0o644)))
                 .chain(disk.gpt.prepare_script.iter().map(|script| (script, 0o755)))
                 {
                     let source = directory.join(&resource.source);

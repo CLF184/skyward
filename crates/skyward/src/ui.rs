@@ -2561,7 +2561,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // Partitions that cannot be read are the page's to say.
                     Effect::ReadFilesystems => app.set_filesystems(read_filesystems().map_err(|e| format!("{e:#}"))),
                     Effect::PrintPartitionTables => {
-                        let lines = advanced::print_partition_tables(cfg).unwrap_or_else(|e| {
+                        let lines = advanced::print_partition_tables().unwrap_or_else(|e| {
                             vec![
                                 app.state.lang.pick(["无法读取分区表", "無法讀取分割表", "Couldn't read the partition tables"]).into(),
                                 format!("{e:#}"),

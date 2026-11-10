@@ -102,32 +102,19 @@ pub fn check_gpt(cfg: &DeviceConfig) -> Result<()> {
     Ok(())
 }
 
-/// List the configured GPTs without entering disk maintenance.
-pub fn print_partition_tables(cfg: &DeviceConfig) -> Result<Vec<String>> {
-    let gpt = &configured(cfg)?.gpt;
+/// List the partitions on sda without entering disk maintenance.
+pub fn print_partition_tables() -> Result<Vec<String>> {
+    let output = Command::new("/system/bin/parted")
+        .env("LD_LIBRARY_PATH", "/system/lib64")
+        .args(["/dev/block/sda", "p", "free"])
+        .output()
+        .context("run parted on /dev/block/sda")?;
     let mut lines = Vec::new();
-    for name in &gpt.disks {
-        let device = Path::new("/dev/block").join(name);
-        if !fs::metadata(&device).is_ok_and(|metadata| metadata.file_type().is_block_device()) {
-            continue;
-        }
-        let output = Command::new(&gpt.gdisk.path)
-            .arg("-l")
-            .arg(&device)
-            .output()
-            .with_context(|| format!("list the partition table on {}", device.display()))?;
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines.push(device.display().to_string());
-        for stream in [&output.stdout, &output.stderr] {
-            lines.extend(String::from_utf8_lossy(stream).lines().map(str::to_owned));
-        }
-        if !output.status.success() {
-            lines.push(format!("gdisk: {}", output.status));
-        }
+    for stream in [&output.stdout, &output.stderr] {
+        lines.extend(String::from_utf8_lossy(stream).lines().map(str::to_owned));
     }
-    ensure!(!lines.is_empty(), "no configured block disks were found");
+    ensure!(output.status.success(), "parted ended {}: {}", output.status, lines.join("\n"));
+    ensure!(!lines.is_empty(), "parted printed no partition table");
     Ok(lines)
 }
 
