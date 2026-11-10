@@ -596,10 +596,15 @@ mod tests {
 
     #[test]
     fn a_slot_suffix_that_is_not_one_names_no_partition() {
+        // The suffix goes into a path, so only a slot's own name may reach it.
+        // The empty suffix is the phone with one slot, which is allowed and
+        // simply finds nothing in this folder.
         let dir = tempfile::tempdir().unwrap();
-        for suffix in ["", "../../vbmeta", "_c"] {
-            assert!(read_state(dir.path(), suffix, true).is_ok() == suffix.is_empty(), "{suffix:?}");
+        for suffix in ["../../vbmeta", "_c", "a", "_A"] {
+            let refused = read_state(dir.path(), suffix, true);
+            assert!(refused.is_err(), "{suffix:?} is not a slot suffix, and reached a path anyway");
         }
+        assert!(read_state(dir.path(), "", true).is_err(), "an empty folder holds no vbmeta image");
     }
 
     #[test]
