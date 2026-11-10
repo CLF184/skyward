@@ -191,4 +191,8 @@ jobs:
             zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
             zips+=("$zip#$model ($device)")
           done
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${zips[@]}" images/SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber "${zips[@]}" images/SHA256SUMS
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${zips[@]}" images/SHA256SUMS
+          fi
