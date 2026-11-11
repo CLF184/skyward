@@ -23,7 +23,7 @@ use skyward_info::DeviceInfo;
 use skyward_install::commands::avbctl;
 use skyward_install::{Event, ImageKind, Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::{Failure, Progress};
-use skyward_net::github::{Build, Newest};
+use skyward_net::github::{Address, Build, Newest};
 use skyward_net::release::{Release, Unanswered};
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Joined, Network, Power, Stage as Joining, Traffic, Wlan};
@@ -66,6 +66,8 @@ pub enum Screen {
     /// The AVB checks of the slot the phone runs from: what they are,
     /// and turning them on or off.
     Avb,
+    /// Files in Skyward's shared resource release.
+    Resources,
     Files,
     /// One file, and what can be done with it.
     FileInfo,
@@ -100,6 +102,8 @@ pub enum Screen {
     SkywardUpdate,
     /// Skyward's own licence.
     License,
+    /// The address GitHub pages and release files are read from.
+    GitHub,
     /// The interface typeface and the terms it is used under.
     FontLicense,
     /// Which slot the phone starts from next.
@@ -184,6 +188,29 @@ pub enum DownloadEnd {
     Failed(Failure),
 }
 
+/// How far asking GitHub for release resources has come.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ResourcesCheck {
+    #[default]
+    Idle,
+    Asking,
+    Failed(Unanswered),
+    Answered(Vec<Build>),
+}
+
+/// Downloading a release resource, as the Resources page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceJob {
+    pub build: Build,
+    /// None until the download has begun.
+    pub progress: Option<Progress>,
+    /// Bytes a second.
+    pub rate: u64,
+    pub outcome: Option<DownloadEnd>,
+    /// Stopping was asked for and is under way.
+    pub stopping: bool,
+}
+
 /// How far asking GitHub for Skyward's newest release has come.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SkywardCheck {
@@ -235,6 +262,21 @@ pub enum SkywardEnd {
 /// Where the full packages downloaded go, from the top of internal
 /// storage: the folder the stock updater keeps them in.
 pub const DOWNLOADS: &str = "downloaded_rom";
+
+/// Where release resources are downloaded before the installer opens them.
+pub const RESOURCE_DOWNLOADS: &str = "/skyward/run/resources";
+
+/// The GitHub addresses offered, and what the pages call each.
+pub const GITHUB_ADDRESSES: [(&str, Text); 4] = [
+    ("github", ["GitHub 官方", "GitHub 官方", "GitHub"]),
+    ("gh_proxy", ["gh-proxy.com", "gh-proxy.com", "gh-proxy.com"]),
+    ("ghfast", ["ghfast.top", "ghfast.top", "ghfast.top"]),
+    ("ghproxy_net", ["ghproxy.net", "ghproxy.net", "ghproxy.net"]),
+];
+
+pub fn resource_path(name: &str) -> String {
+    format!("{RESOURCE_DOWNLOADS}/{name}")
+}
 
 /// Where the USB drive plugged in is shown.
 pub const USB_DRIVE: &str = "/mnt/usb";
@@ -1226,6 +1268,8 @@ pub enum Action {
     ScreenOff(usize),
     /// Keep the time zone at this place in [`TIME_ZONES`].
     TimeZone(usize),
+    /// Read GitHub through this address in [`GITHUB_ADDRESSES`].
+    ChooseGithub(usize),
     /// Speak this language.
     Language(Lang),
     /// Tick or untick a part of the backup, by its place in
@@ -1336,6 +1380,16 @@ pub enum Action {
     InstallDownloaded,
     /// Ask GitHub for Skyward's newest release.
     CheckSkyward,
+    /// Ask GitHub for the files in Skyward's shared resource release.
+    CheckResources,
+    /// Download the resource at this place in the list.
+    DownloadResource(usize),
+    /// Stop downloading the resource.
+    StopResource,
+    /// Open the downloaded resource with the package installer.
+    OpenResource,
+    /// Open the file manager in the folder resources are downloaded to.
+    OpenResourceFolder,
     /// Download the newest release's build for the phone and write it into
     /// the recovery partitions.
     UpdateSkyward,
@@ -1622,6 +1676,9 @@ pub struct State {
     /// The time zone the clock and the times on the pages keep, by its
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
+    /// The address GitHub is read through, by its place in
+    /// [`GITHUB_ADDRESSES`].
+    pub github: usize,
     pub vibrate: bool,
     /// How strongly the motor taps, from 0 at the slider's left end to 1
     /// at its right.
@@ -1819,6 +1876,9 @@ pub struct State {
     /// Downloading the newest system's full package, or how that last
     /// ended.
     pub download: Option<DownloadJob>,
+    pub resources_check: ResourcesCheck,
+    /// Downloading a release resource, or how that last ended.
+    pub resource_job: Option<ResourceJob>,
     pub skyward_check: SkywardCheck,
     /// Updating Skyward, or how that last ended.
     pub skyward_job: Option<SkywardJob>,
@@ -1839,6 +1899,7 @@ impl Default for State {
             // Two minutes.
             screen_off: 3,
             time_zone: 0,
+            github: 0,
             vibrate: true,
             vibration: SLIDER_START,
             file_transfer: true,
@@ -1921,6 +1982,8 @@ impl Default for State {
             check: Check::Idle,
             have: Have::Nothing,
             download: None,
+            resources_check: ResourcesCheck::Idle,
+            resource_job: None,
             skyward_check: SkywardCheck::Idle,
             skyward_job: None,
             traffic: Traffic::default(),
@@ -1992,6 +2055,23 @@ impl State {
         }
     }
 
+    /// The files GitHub gives in Skyward's shared resource release.
+    pub fn resource_assets(&self) -> &[Build] {
+        match &self.resources_check {
+            ResourcesCheck::Answered(builds) => builds,
+            _ => &[],
+        }
+    }
+
+    pub fn github_address(&self) -> Address {
+        Address::from_key(GITHUB_ADDRESSES[self.github].0).unwrap_or_default()
+    }
+
+    /// Whether a release resource is being downloaded.
+    pub fn downloading_resource(&self) -> bool {
+        self.resource_job.as_ref().is_some_and(|j| j.outcome.is_none())
+    }
+
     /// Whether Skyward is being updated.
     pub fn updating_skyward(&self) -> bool {
         self.skyward_job.as_ref().is_some_and(|j| j.outcome.is_none())
@@ -2004,6 +2084,7 @@ impl State {
         match screen {
             Screen::Wlan => self.wlan.is_some(),
             Screen::SkywardUpdate => self.wlan.is_some() && self.recovery_partitions,
+            Screen::Resources => self.wlan.is_some(),
             Screen::Systems => self.dual_boot,
             _ => true,
         }
@@ -2244,6 +2325,13 @@ pub enum Effect {
     /// Ask GitHub for Skyward's newest release, telling what it answered
     /// with [`App::skyward_checked`].
     CheckSkyward,
+    /// Ask GitHub for the files in Skyward's shared release, telling what
+    /// it answered with [`App::resources_checked`].
+    CheckResources,
+    /// Download `build` to `path`, telling how it goes with
+    /// [`App::resource_progress`] and [`App::resource_ended`].
+    DownloadResource { build: Build, path: String },
+    StopResource,
     /// Download `build` and write it into the recovery partitions, telling
     /// how it goes with [`App::skyward_progress`] and
     /// [`App::skyward_ended`].
@@ -3888,6 +3976,38 @@ impl App {
         }
     }
 
+    /// What GitHub answered of the resources in Skyward's shared release.
+    pub fn resources_checked(&mut self, answer: Result<Vec<Build>, Unanswered>) {
+        self.state.resources_check = match answer {
+            Ok(builds) => ResourcesCheck::Answered(builds),
+            Err(why) => ResourcesCheck::Failed(why),
+        };
+        if self.screen() == Screen::Resources {
+            self.refresh();
+        }
+    }
+
+    /// How far downloading a release resource has come, and how fast it
+    /// goes, in bytes a second.
+    pub fn resource_progress(&mut self, progress: Progress, rate: u64) {
+        let job = self.state.resource_job.as_mut().expect("only a resource download under way moves on");
+        job.progress = Some(progress);
+        job.rate = rate;
+        if self.screen() == Screen::Resources {
+            self.refresh();
+        }
+    }
+
+    /// Downloading a release resource has ended: its page says how, lit for
+    /// the user to read.
+    pub fn resource_ended(&mut self, end: DownloadEnd, now: u64) {
+        let job = self.state.resource_job.as_mut().expect("only a resource download under way ends");
+        job.stopping = false;
+        job.outcome = Some(end);
+        self.wake(now);
+        self.refresh();
+    }
+
     /// How far updating Skyward has come, and how fast the download goes,
     /// in bytes a second.
     pub fn skyward_progress(&mut self, stage: SkywardStage, rate: u64) {
@@ -5119,6 +5239,13 @@ impl App {
                 self.state.restore = None;
                 self.state.asking_delete = false;
             }
+            Screen::Resources => {
+                if self.state.downloading_resource() {
+                    self.say(l.pick(WAIT_OR_STOP), now);
+                    return fx;
+                }
+                self.state.resource_job = None;
+            }
             // The page stays while Skyward is updated: once downloaded, the
             // build is written at once, which nothing may cut short.
             Screen::SkywardUpdate => match self.state.skyward_job.as_ref().filter(|j| j.outcome.is_none()).map(|j| j.stage) {
@@ -5361,6 +5488,12 @@ impl App {
                     fx.push(Effect::CheckUpdate);
                 }
                 fx
+            }
+            Screen::Resources
+                if matches!(self.state.resources_check, ResourcesCheck::Idle | ResourcesCheck::Failed(_)) && self.state.online() =>
+            {
+                self.state.resources_check = ResourcesCheck::Asking;
+                vec![Effect::CheckResources]
             }
             // Skyward's own page asks GitHub the same way.
             Screen::SkywardUpdate if matches!(self.state.skyward_check, SkywardCheck::Idle | SkywardCheck::Failed(_)) && self.state.online() => {
@@ -5671,6 +5804,10 @@ impl App {
                 self.state.time_zone = k;
                 self.refresh();
             }
+            Action::ChooseGithub(k) => {
+                self.state.github = k;
+                self.refresh();
+            }
             Action::Language(l) => {
                 self.state.lang = l;
                 self.state.language_chosen = true;
@@ -5960,6 +6097,52 @@ impl App {
                     self.refresh();
                     return vec![Effect::CheckSkyward];
                 }
+            }
+            Action::CheckResources => {
+                if !self.state.online() {
+                    self.open(Screen::Wlan);
+                    return self.arrive_at(Screen::Wlan);
+                }
+                if self.state.resources_check != ResourcesCheck::Asking {
+                    self.state.resources_check = ResourcesCheck::Asking;
+                    self.refresh();
+                    return vec![Effect::CheckResources];
+                }
+            }
+            Action::DownloadResource(k) => {
+                let build = self.state.resource_assets().get(k).expect("the chosen resource is in the list").clone();
+                if !self.state.online() {
+                    self.open(Screen::Wlan);
+                    return self.arrive_at(Screen::Wlan);
+                }
+                if !self.state.downloading_resource() {
+                    self.state.resource_job =
+                        Some(ResourceJob { build: build.clone(), progress: None, rate: 0, outcome: None, stopping: false });
+                    self.refresh();
+                    return vec![Effect::DownloadResource { path: resource_path(&build.name), build }];
+                }
+            }
+            Action::StopResource => {
+                let job = self.state.resource_job.as_mut().expect("only a resource download under way is stopped");
+                if job.outcome.is_none() && !job.stopping {
+                    job.stopping = true;
+                    self.refresh();
+                    return vec![Effect::StopResource];
+                }
+            }
+            Action::OpenResource => {
+                let downloaded = self.state.resource_job.as_ref().and_then(|job| {
+                    (job.outcome == Some(DownloadEnd::Downloaded)).then(|| (resource_path(&job.build.name), job.build.size))
+                });
+                if let Some((path, size)) = downloaded {
+                    return self.install_opened(path, size, now);
+                }
+            }
+            Action::OpenResourceFolder => {
+                self.state.files = Folder::new(RESOURCE_DOWNLOADS);
+                self.state.clip = None;
+                self.open(Screen::Files);
+                return vec![Effect::ReadDir(RESOURCE_DOWNLOADS.into())];
             }
             // The build goes into the recovery partitions an install may
             // write too, so one waits for the other.
@@ -7421,6 +7604,7 @@ mod tests {
             Screen::Backup,
             Screen::Restore,
             Screen::Advanced,
+            Screen::Resources,
             Screen::Files,
             Screen::Terminal,
             Screen::Language,
@@ -7429,6 +7613,7 @@ mod tests {
             Screen::Update,
             Screen::SkywardUpdate,
             Screen::License,
+            Screen::GitHub,
             Screen::FontLicense,
             Screen::Slot,
             Screen::Fastboot,
@@ -9807,9 +9992,11 @@ mod tests {
             (Screen::Advanced, Screen::Avb),
             (Screen::Settings, Screen::Language),
             (Screen::Settings, Screen::TimeZone),
+            (Screen::Settings, Screen::GitHub),
             (Screen::Settings, Screen::Terminal),
             (Screen::About, Screen::Logs),
             (Screen::Specs, Screen::License),
+            (Screen::Advanced, Screen::Resources),
             (Screen::Specs, Screen::FontLicense),
         ];
         for (from, to) in routes {
@@ -11426,6 +11613,70 @@ mod tests {
         app.update_checked(Err(Unanswered::Failed("update.miui.com did not answer".into())), Have::Nothing);
         app.key(Key::Back, 0);
         assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Update)), vec![Effect::ReadUpdate, Effect::CheckUpdate], "a failed check is tried again");
+    }
+
+    #[test]
+    fn the_github_address_is_chosen_from_the_settings() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::GitHub));
+        assert_eq!(app.screen(), Screen::GitHub);
+        tap(&mut app, &f, &i, Action::ChooseGithub(2));
+        assert_eq!(app.state.github, 2);
+        assert_eq!(app.state.github_address(), Address::GhFast);
+    }
+
+    fn resource_build(name: &str, size: u64, digest: char) -> Build {
+        Build {
+            name: name.into(),
+            url: format!("https://github.com/CLF184/skyward/releases/download/resource/{name}"),
+            link: format!("https://github.com/CLF184/skyward/releases/download/resource/{name}"),
+            size,
+            sha256: digest.to_string().repeat(64),
+        }
+    }
+
+    #[test]
+    fn release_resources_download_and_open_the_package_installer() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        app.state.wlan = Some(connected("Skyward"));
+        app.refresh();
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Resources)), vec![Effect::CheckResources]);
+        let archive = resource_build("root-kit.zip", 13_000_000, 'b');
+        app.resources_checked(Ok(vec![archive.clone()]));
+        let hits = app.frame(&f, &i).hits.clone();
+        assert!(hits.iter().any(|h| h.action == Action::DownloadResource(0)));
+        let path = resource_path(&archive.name);
+        assert_eq!(
+            tap(&mut app, &f, &i, Action::DownloadResource(0)),
+            vec![Effect::DownloadResource { build: archive.clone(), path: path.clone() }]
+        );
+        app.resource_progress(Progress::Downloading { done: 1_000_000, total: archive.size }, 500_000);
+        assert!(app.state.downloading_resource());
+        assert_eq!(tap(&mut app, &f, &i, Action::StopResource), vec![Effect::StopResource]);
+        app.resource_ended(DownloadEnd::Stopped, 0);
+        assert_eq!(
+            tap_at(&mut app, &f, &i, Action::DownloadResource(0), 2000),
+            vec![Effect::DownloadResource { build: archive.clone(), path: path.clone() }],
+            "a stopped download can be started again"
+        );
+        app.resource_ended(DownloadEnd::Downloaded, 3000);
+        assert_eq!(tap_at(&mut app, &f, &i, Action::OpenResource, 5000), vec![Effect::InstallPath(path)]);
+        assert_eq!((app.screen(), app.state.source), (Screen::Installing, Source::Opened { drive: false }));
+        assert_eq!(app.state.package_name.as_deref(), Some(archive.name.as_str()));
+    }
+
+    #[test]
+    fn release_resources_open_their_download_folder() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Resources, W, H, PPD);
+        assert_eq!(
+            tap(&mut app, &f, &i, Action::OpenResourceFolder),
+            vec![Effect::ReadDir(RESOURCE_DOWNLOADS.into())]
+        );
+        assert_eq!(app.screen(), Screen::Files);
+        assert_eq!(app.state.files.path, RESOURCE_DOWNLOADS);
     }
 
     fn skyward_newest(newer: bool) -> Newest {

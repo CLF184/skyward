@@ -12,8 +12,52 @@ pub const REPOSITORY: &str = "Rinrroy/skyward-for-haotian";
 /// Where GitHub answers which release of this fork is the newest.
 pub const LATEST: &str = "https://api.github.com/repos/Rinrroy/skyward-for-haotian/releases/latest";
 
+/// The release whose Resources hold files shared by Skyward builds.
+pub const RESOURCE: &str = "https://github.com/CLF184/skyward/releases/tag/resource";
+
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";
+
+/// Where GitHub pages and release files are read from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Address {
+    #[default]
+    GitHub,
+    GhProxy,
+    GhFast,
+    GhProxyNet,
+}
+
+impl Address {
+    pub fn key(self) -> &'static str {
+        match self {
+            Address::GitHub => "github",
+            Address::GhProxy => "gh_proxy",
+            Address::GhFast => "ghfast",
+            Address::GhProxyNet => "ghproxy_net",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "github" => Some(Address::GitHub),
+            "gh_proxy" => Some(Address::GhProxy),
+            "ghfast" => Some(Address::GhFast),
+            "ghproxy_net" => Some(Address::GhProxyNet),
+            _ => None,
+        }
+    }
+
+    /// `url`, through this address when it is a proxy.
+    pub fn source(self, url: &str) -> String {
+        match self {
+            Address::GitHub => url.to_string(),
+            Address::GhProxy => format!("https://gh-proxy.com/{url}"),
+            Address::GhFast => format!("https://ghfast.top/{url}"),
+            Address::GhProxyNet => format!("https://ghproxy.net/{url}"),
+        }
+    }
+}
 
 /// The newest release, as the build of Skyward that asked sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,9 +90,91 @@ impl Build {
     /// Where to download the image from, in the order to try: the file's own
     /// short-lived address, where GitHub's API gave one, then the release's
     /// link on github.com, which some networks do not reach.
-    pub fn sources(&self, located: Option<String>) -> Vec<String> {
-        located.into_iter().chain([self.link.clone()]).collect()
+    pub fn sources(&self, located: Option<String>, address: Address) -> Vec<String> {
+        match address {
+            Address::GitHub => located.into_iter().chain([self.link.clone()]).collect(),
+            Address::GhProxy | Address::GhFast | Address::GhProxyNet => [address.source(&self.link), self.link.clone()].to_vec(),
+        }
     }
+}
+
+/// The files in the Resources section `page` holds.
+pub fn assets(page: &str) -> Result<Vec<Build>> {
+    let mut builds = Vec::new();
+    let marker = "/releases/download/";
+    let mut at = 0;
+    while let Some(found) = page[at..].find(marker) {
+        let found = at + found;
+        let href_start = page[..found].rfind("href=\"").context("the Resources section has a file without a link")? + 6;
+        let href_end = page[href_start..].find('"').with_context(|| format!("read the link at byte {href_start}"))? + href_start;
+        let href = &page[href_start..href_end];
+        at = href_end;
+        let name = href.rsplit('/').next().unwrap_or(href);
+        let block_end = page[href_start..].find("</li>").map_or(page.len(), |end| href_start + end);
+        let block = &page[href_start..block_end];
+        let sha256 = resource_sha256(block).with_context(|| format!("GitHub gives no SHA-256 of {name}"))?;
+        let link = if href.starts_with("https://") { href.to_string() } else { format!("https://github.com{href}") };
+        builds.push(Build { name: name.to_string(), url: link.clone(), link, size: resource_size(block).unwrap_or(0), sha256 });
+    }
+    ensure!(!builds.is_empty(), "the release Resources section has no files");
+    Ok(builds)
+}
+
+/// The SHA-256 GitHub shows in a Resources section block.
+fn resource_sha256(block: &str) -> Option<String> {
+    let start = block.find("sha256:")? + "sha256:".len();
+    let digest = block.get(start..start + 64)?;
+    digest.bytes().all(|b| b.is_ascii_hexdigit()).then(|| digest.to_ascii_lowercase())
+}
+
+/// The size GitHub shows in a Resources section block.
+fn resource_size(block: &str) -> Option<u64> {
+    const MARKER: &str = "min-width: clamp(50px, 15vw, 75px)";
+    let marker = block.find(MARKER)?;
+    let start = block[marker..].find('>')? + marker + 1;
+    let end = block[start..].find("</span>")? + start;
+    bytes(block[start..end].trim())
+}
+
+fn bytes(text: &str) -> Option<u64> {
+    let (number, unit) = text.split_once(' ')?;
+    let number = number.parse::<f64>().ok()?;
+    let scale = match unit {
+        "Bytes" => 1.0,
+        "KB" => 1_000.0,
+        "MB" => 1_000_000.0,
+        "GB" => 1_000_000_000.0,
+        "TB" => 1_000_000_000_000.0,
+        _ => return None,
+    };
+    Some((number * scale).round() as u64)
+}
+
+/// The Resources section of the shared `resource` release.
+fn resource_page() -> &'static str {
+    "https://github.com/CLF184/skyward/releases/expanded_assets/resource"
+}
+
+/// Ask GitHub for the files in the shared `resource` release.
+pub fn ask_resources(agent: &ureq::Agent, address: Address, running: &str) -> Result<Vec<Build>> {
+    let page = read(agent, &address.source(resource_page()), running)?;
+    assets(&page)
+}
+
+/// What `url` answers as text.
+fn read(agent: &ureq::Agent, url: &str, running: &str) -> Result<String> {
+    let mut response = agent
+        .get(url)
+        .header("Accept", "text/html")
+        .header("User-Agent", format!("Skyward/{running}"))
+        .call()
+        .with_context(|| format!("ask {url}"))?;
+    let status = response.status();
+    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {url}"))?;
+    if !status.is_success() {
+        bail!(refusal(status, &body));
+    }
+    Ok(body)
 }
 
 #[derive(Deserialize)]
@@ -179,8 +305,31 @@ mod tests {
     fn an_image_is_downloaded_from_where_github_sends_it_then_from_its_link() {
         let build = newest(ANSWERED_013, "ishtar", "0.1.2").unwrap().build.unwrap();
         let link = "https://github.com/Rinrroy/skyward-for-haotian/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.img";
-        assert_eq!(build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into())), ["https://release-assets.githubusercontent.com/a?sig=1", link]);
-        assert_eq!(build.sources(None), [link], "where GitHub's API gave no address");
+        assert_eq!(
+            build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into()), Address::GitHub),
+            ["https://release-assets.githubusercontent.com/a?sig=1", link]
+        );
+        assert_eq!(build.sources(None, Address::GitHub), [link], "where GitHub's API gave no address");
+        assert_eq!(
+            build.sources(None, Address::GhProxy),
+            [format!("https://gh-proxy.com/{link}"), link.into()],
+            "the proxy comes first, with GitHub itself after it"
+        );
+        assert_eq!(Address::GhFast.source("https://github.com/a/b"), "https://ghfast.top/https://github.com/a/b");
+        assert_eq!(Address::from_key("ghproxy_net"), Some(Address::GhProxyNet));
+    }
+
+    #[test]
+    fn every_file_in_the_resource_release_is_an_option() {
+        let page = r#"<ul>
+        <li><a href="/CLF184/skyward/releases/download/resource/root.zip">Root</a><span>sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</span><span style="min-width: clamp(50px, 15vw, 75px);">12.0 MB</span></li>
+        <li><a href="/CLF184/skyward/releases/download/resource/boot.img">Boot</a><span>sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</span><span style="min-width: clamp(50px, 15vw, 75px);">8.5 MB</span></li>
+        </ul>"#;
+        let builds = assets(page).unwrap();
+        assert_eq!(builds.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["root.zip", "boot.img"]);
+        assert_eq!(builds[0].size, 12_000_000);
+        assert_eq!(builds[0].link, "https://github.com/CLF184/skyward/releases/download/resource/root.zip");
+        assert_eq!(RESOURCE, "https://github.com/CLF184/skyward/releases/tag/resource");
     }
 
     /// A server on this computer that answers one request with `answer`,

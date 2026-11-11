@@ -1548,6 +1548,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Asking GitHub for Skyward's newest release, and updating to it.
     let mut skyward_checker: Option<updates::Worker> = None;
     let mut skyward_updater: Option<updates::Worker> = None;
+    // Asking GitHub for release resources, and downloading the one chosen.
+    let mut resource_checker: Option<updates::Worker> = None;
+    let mut resource_downloader: Option<updates::Worker> = None;
     // The phone sleeps while its screen is off and nothing needs it awake.
     let sleeper = Sleeper::start()?;
     // A uevent may be a charger or a computer attached or taken away: the
@@ -1790,6 +1793,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || downloader.is_some()
             || skyward_checker.is_some()
             || skyward_updater.is_some()
+            || resource_checker.is_some()
+            || resource_downloader.is_some()
             || systems_busy;
         let joining = app.state.wlan.as_ref().and_then(|w| w.joined.as_ref()).is_some_and(|j| matches!(j.stage, Joining::Joining | Joining::Addressing));
         let running = match &shell {
@@ -1879,6 +1884,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(u) = &skyward_updater {
             fds.push(u.fd());
+        }
+        if let Some(c) = &resource_checker {
+            fds.push(c.fd());
+        }
+        if let Some(d) = &resource_downloader {
+            fds.push(d.fd());
         }
         if let Some(s) = &systems_worker {
             fds.push(s.fd());
@@ -2282,7 +2293,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.download_ended(end, have(&app, &release), now);
                         fetched = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::Writing { .. } => {
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::ResourcesChecked(_) | updates::Event::Writing { .. } => {
                         unreachable!("a download asks nothing of its own, and writes nothing")
                     }
                 }
@@ -2303,6 +2314,45 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if asked {
             skyward_checker = None;
         }
+        let mut resources_asked = false;
+        if let Some(c) = &resource_checker {
+            for ev in c.events() {
+                let updates::Event::ResourcesChecked(answer) = ev else { unreachable!("asking GitHub downloads nothing") };
+                skyward_sys::kmsg(&format!("GitHub told of the release resources: {answer:?}"))?;
+                app.resources_checked(answer);
+                resources_asked = true;
+            }
+        }
+        if resources_asked {
+            resource_checker = None;
+        }
+        let mut resource_downloaded = false;
+        if let Some(d) = &resource_downloader {
+            for ev in d.events() {
+                match ev {
+                    updates::Event::Progress(progress, rate) => app.resource_progress(progress, rate),
+                    updates::Event::Ended(end) => {
+                        let end = match end {
+                            updates::End::Downloaded => DownloadEnd::Downloaded,
+                            updates::End::Stopped => DownloadEnd::Stopped,
+                            updates::End::Failed(why) => DownloadEnd::Failed(why),
+                            updates::End::Updated(_) | updates::End::NotWritten(_) | updates::End::WriteFailed(..) => {
+                                unreachable!("a release resource is only downloaded")
+                            }
+                        };
+                        skyward_sys::kmsg(&format!("downloading a release resource ended: {end:?}"))?;
+                        app.resource_ended(end, now);
+                        resource_downloaded = true;
+                    }
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::ResourcesChecked(_) | updates::Event::Writing { .. } => {
+                        unreachable!("a resource download asks nothing of its own, and writes nothing")
+                    }
+                }
+            }
+        }
+        if resource_downloaded {
+            resource_downloader = None;
+        }
         let mut updated = false;
         if let Some(u) = &skyward_updater {
             for ev in u.events() {
@@ -2322,7 +2372,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.skyward_ended(end, now);
                         updated = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) => unreachable!("an update asks nothing of its own"),
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::ResourcesChecked(_) => {
+                        unreachable!("an update asks nothing of its own")
+                    }
                 }
             }
         }
@@ -2914,6 +2966,23 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let task = updates::Task::CheckSkyward { probe, codename: cfg.device.codename.clone() };
                         skyward_checker = Some(updates::Worker::start(task, servers.clone())?);
                     }
+                    Effect::CheckResources => {
+                        ensure!(resource_checker.is_none(), "GitHub is being asked already");
+                        let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
+                        let task = updates::Task::CheckResources { probe, address: app.state.github_address() };
+                        resource_checker = Some(updates::Worker::start(task, servers.clone())?);
+                    }
+                    Effect::DownloadResource { build, path } => {
+                        ensure!(resource_downloader.is_none(), "a resource is being downloaded already");
+                        ensure!(installer.is_none(), "an installer is running already");
+                        let path = PathBuf::from(path);
+                        let folder = path.parent().context("the resource has no folder")?;
+                        fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
+                        skyward_sys::kmsg(&format!("downloading release resource {}", build.name))?;
+                        let task = updates::Task::DownloadResource { build, address: app.state.github_address(), path };
+                        resource_downloader = Some(updates::Worker::start(task, servers.clone())?);
+                    }
+                    Effect::StopResource => resource_downloader.as_ref().context("no resource is being downloaded")?.stop(),
                     // The zip goes into the recovery's own folder, which is
                     // in memory, before its image goes into the recovery
                     // partitions.
@@ -2922,7 +2991,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         ensure!(installer.is_none(), "an installer is running already");
                         skyward_sys::kmsg(&format!("updating Skyward to {}", build.name))?;
                         let path = Path::new(skyward_sys::RUN).join(&build.name);
-                        let task = updates::Task::UpdateSkyward { build, codename: cfg.device.codename.clone(), path };
+                        let task =
+                            updates::Task::UpdateSkyward { build, address: app.state.github_address(), codename: cfg.device.codename.clone(), path };
                         skyward_updater = Some(updates::Worker::start(task, servers.clone())?);
                     }
                     Effect::StopSkywardUpdate => skyward_updater.as_ref().context("Skyward is not being updated")?.stop(),
