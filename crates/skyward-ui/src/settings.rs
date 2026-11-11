@@ -5,7 +5,7 @@
 //! a time zone, a part or a place by its name, so a later version that lists
 //! them otherwise reads them the same.
 
-use crate::app::{Place, State, SCREEN_OFF, TIME_ZONES};
+use crate::app::{Place, State, GITHUB_ADDRESSES, SCREEN_OFF, TIME_ZONES};
 use crate::Lang;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,8 @@ pub struct Settings {
     pub screen_off: u64,
     /// The time zone, by its name in the tz database.
     pub time_zone: String,
+    /// The GitHub address, by its name.
+    pub github: String,
     pub vibrate: bool,
     /// The vibration slider's place, from 0 at its left end to 1.
     pub vibration: f32,
@@ -123,6 +125,7 @@ impl Settings {
             brightness: state.brightness,
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
+            github: GITHUB_ADDRESSES[state.github].0.to_string(),
             vibrate: state.vibrate,
             vibration: state.vibration,
             file_transfer: state.file_transfer,
@@ -179,6 +182,9 @@ impl Settings {
         if let Some(at) = TIME_ZONES.iter().position(|zone| zone.2 == self.time_zone) {
             state.time_zone = at;
         }
+        if let Some(at) = GITHUB_ADDRESSES.iter().position(|(key, _)| *key == self.github) {
+            state.github = at;
+        }
         state.vibrate = self.vibrate;
         if (0.0..=1.0).contains(&self.vibration) {
             state.vibration = self.vibration;
@@ -214,7 +220,7 @@ fn picked<const N: usize>(kept: &[String], all: &[&str; N]) -> [bool; N] {
 /// What the settings file held as the recovery started.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kept {
-    Settings(Settings),
+    Settings(Box<Settings>),
     /// No settings: no file, or one that does not read as settings.
     Nothing,
     /// Where the file is could not be read; it is left alone this time.
@@ -246,7 +252,7 @@ pub struct Keeper {
 impl Keeper {
     pub fn new(kept: &Kept) -> Keeper {
         let holds = match kept {
-            Kept::Settings(settings) => Some(Some(settings.clone())),
+            Kept::Settings(settings) => Some(Some((**settings).clone())),
             Kept::Nothing => Some(None),
             Kept::Unreadable => None,
         };
@@ -305,6 +311,7 @@ mod tests {
             brightness: 0.7,
             screen_off: 6,
             time_zone: 7,
+            github: 2,
             vibrate: false,
             vibration: 0.4,
             file_transfer: false,
@@ -322,7 +329,7 @@ mod tests {
         let mut back = State::default();
         kept.apply(&mut back);
         assert_eq!(Settings::of(&back), Settings::of(&state));
-        assert_eq!((back.lang, back.screen_off, back.time_zone), (Lang::En, 6, 7));
+        assert_eq!((back.lang, back.screen_off, back.time_zone, back.github), (Lang::En, 6, 7, 2));
     }
 
     #[test]
@@ -375,7 +382,7 @@ mod tests {
 
     #[test]
     fn changed_settings_are_written_once_they_have_stood_for_a_moment() {
-        let mut keeper = Keeper::new(&Kept::Settings(Settings::default()));
+        let mut keeper = Keeper::new(&Kept::Settings(Box::default()));
         assert_eq!(keeper.due(Settings::default(), 0), None, "what the file holds is not written again");
         let dark = Settings { dark: true, ..Settings::default() };
         assert_eq!(keeper.due(dark.clone(), 1_000), None);

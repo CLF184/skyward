@@ -60,6 +60,12 @@ pub const ENTRIES: &[Entry] = &[
     ),
     entry(["导出日志", "匯出記錄", "Export logs"], ADVANCED, Screen::Logs, &["daochurizhi", "dcrz", "rizhi", "rz", "logs", "dmesg"]),
     entry(
+        ["资源下载", "資源下載", "Resource downloads"],
+        ADVANCED,
+        Screen::Resources,
+        &["resourcerelease", "resources", "ziyuan", "zy", "apk", "zip", "img", "magisk", "root", "资源", "資源"],
+    ),
+    entry(
         ["系统更新", "系統更新", "System update"],
         ADVANCED,
         Screen::Update,
@@ -74,6 +80,12 @@ pub const ENTRIES: &[Entry] = &[
     entry(["文件传输", "檔案傳輸", "File transfer"], SETTINGS, Screen::Settings, &["wenjianchuanshu", "wjcs", "chuanshu", "mtp", "usb"]),
     entry(["语言", "語言", "Language"], SETTINGS, Screen::Language, &["yuyan", "yy", "language", "fanti", "jianti", "english"]),
     entry(["时区", "時區", "Time zone"], SETTINGS, Screen::TimeZone, &["shiqu", "sq", "timezone"]),
+    entry(
+        ["GitHub 地址", "GitHub 位址", "GitHub address"],
+        SETTINGS,
+        Screen::GitHub,
+        &["github", "dizhi", "dz", "mirror", "jingxiang", "jiasu"],
+    ),
     entry(["重启", "重新啟動", "Reboot"], HOME, Screen::Reboot, &["chongqi", "cq", "reboot", "fastboot", "bootloader", "edl", "guanji"]),
     entry(["启动槽位", "啟動槽位", "Boot slot"], ["重启", "重新啟動", "Reboot"], Screen::Slot, &["qidongcaowei", "qdcw", "caowei", "cw", "slot"]),
     entry(["关于本机", "關於手機", "About phone"], SETTINGS, Screen::About, &["guanyubenji", "gybj", "about", "banben", "version"]),
@@ -221,5 +233,11 @@ mod tests {
         assert!(find("", Lang::Hans).is_empty());
         assert!(find("   ", Lang::En).is_empty());
         assert!(find("zzzz", Lang::Hant).is_empty());
+    }
+
+    #[test]
+    fn release_resources_are_found_on_the_advanced_page() {
+        assert_eq!(find("resources", Lang::En).iter().map(|e| e.title[2]).collect::<Vec<_>>(), ["Resource downloads"]);
+        assert_eq!(find("magisk", Lang::Hans).iter().map(|e| e.title[0]).collect::<Vec<_>>(), ["资源下载"]);
     }
 }

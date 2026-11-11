@@ -1362,13 +1362,15 @@ pub struct Row<'a> {
     /// A word in an outline after the title, such as a network's bands.
     pub tag: Option<&'a str>,
     pub sub: Option<&'a str>,
+    /// `sub` stays on one line and is cut with an ellipsis past its room.
+    pub sub_nowrap: bool,
     pub trail: Trail<'a>,
     pub tint: Option<Rgba>,
 }
 
 impl<'a> Row<'a> {
     pub fn new(title: &'a str) -> Self {
-        Row { icon: None, fan: None, title, tag: None, sub: None, trail: Trail::Arrow, tint: None }
+        Row { icon: None, fan: None, title, tag: None, sub: None, sub_nowrap: false, trail: Trail::Arrow, tint: None }
     }
     pub fn icon(mut self, color: Rgba, icon: Icon) -> Self {
         self.icon = Some((color, icon));
@@ -1384,6 +1386,11 @@ impl<'a> Row<'a> {
     }
     pub fn subtitle(mut self, sub: &'a str) -> Self {
         self.sub = Some(sub);
+        self
+    }
+    pub fn subtitle_nowrap(mut self, sub: &'a str) -> Self {
+        self.sub = Some(sub);
+        self.sub_nowrap = true;
         self
     }
     pub fn trail(mut self, trail: Trail<'a>) -> Self {
@@ -1425,7 +1432,7 @@ fn layout(c: &Canvas, t: &Theme, f: &Fonts, r: &Row) -> Layout {
         Trail::Choice(s) => m.dp(UPDOWN_RIGHT + UPDOWN_W + UPDOWN_VALUE_GAP) + m.value_gap + c.text_width(&f.value, s, m.sub_px),
     };
     let text_max = card_w - text_x - trail_w;
-    let sub_lines = r.sub.map(|s| wrap(c, &f.body, s, m.sub_px, text_max)).unwrap_or_default();
+    let sub_lines = r.sub.map(|s| if r.sub_nowrap { vec![s.to_string()] } else { wrap(c, &f.body, s, m.sub_px, text_max) }).unwrap_or_default();
     let h = if sub_lines.is_empty() {
         if r.fan.is_some() {
             m.dp(FAN_ROW_H)
@@ -1469,7 +1476,7 @@ fn draw_row(c: &mut Canvas, t: &Theme, f: &Fonts, r: &Row, lay: &Layout, top: f3
         c.text_top(&f.heading, r.title, tx, ink_top, m.row_title_px, color, title_max);
         let mut st_top = ink_top + (tb - tt) + m.sub_gap;
         for line in &lay.sub_lines {
-            c.text_top(&f.body, line, tx, st_top, m.sub_px, tone.sub, None);
+            c.text_top(&f.body, line, tx, st_top, m.sub_px, tone.sub, r.sub_nowrap.then_some(lay.text_max));
             st_top += m.sub_pitch;
         }
         ink_top + (tb - tt) / 2.0

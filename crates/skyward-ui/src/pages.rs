@@ -1,8 +1,9 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
+    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, ResourcesCheck,
+    Rows, Screen,
     SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
-    BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
+    BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, GITHUB_ADDRESSES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
     USB_DRIVE_WANTED, WIPES, installs, starting,
 };
 use crate::canvas::Canvas;
@@ -80,6 +81,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::RestoreBackup => restore_backup(cx),
         Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
+        Screen::Resources => resources(cx),
         Screen::Files => files(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
@@ -95,6 +97,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Update => update(cx),
         Screen::SkywardUpdate => skyward_update(cx),
         Screen::License => license(cx),
+        Screen::GitHub => github(cx),
         Screen::FontLicense => font_license(cx),
         Screen::Slot => slot(cx),
         Screen::Systems => systems(cx),
@@ -167,11 +170,13 @@ const SPECS: Text = ["全部参数与信息", "全部規格與資訊", "All spec
 const LOGS: Text = ["导出日志", "匯出記錄", "Export logs"];
 const SCREEN_TIMEOUT: Text = ["息屏时间", "螢幕自動關閉", "Screen timeout"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
+const RESOURCES: Text = ["资源下载", "資源下載", "Resource downloads"];
 const SKYWARD_UPDATE: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
 const LANGUAGE: Text = ["语言", "語言", "Language"];
 const TIME_ZONE: Text = ["时区", "時區", "Time zone"];
+const GITHUB: Text = ["GitHub 地址", "GitHub 位址", "GitHub address"];
 const LICENSE: Text = ["开源许可", "開放原始碼授權", "Open source licenses"];
 const FONTS: Text = ["界面字体", "介面字型", "UI fonts"];
 const DUAL_BOOT: Text = ["双系统", "雙系統", "Dual boot"];
@@ -374,8 +379,12 @@ pub fn settings(cx: &Ctx) -> Frame {
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
+        Row::new(l.pick(GITHUB)).icon(SLATE, Icon::Globe).trail(Trail::Value(l.pick(GITHUB_ADDRESSES[s.github].1))),
     ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
+    out.extend(hits(
+        &general.rows,
+        &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Open(Screen::GitHub)],
+    ));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
@@ -416,6 +425,27 @@ fn skyward_value(cx: &Ctx) -> Option<&'static str> {
         (Some(n), _) if n.newer && n.build.is_some() => Some(l.pick(["有新版本", "有新版本", "New version"])),
         _ => None,
     }
+}
+
+/// The GitHub address pages and release files are read through.
+pub fn github(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = page(cx);
+    let top = t.m.content_top;
+    let rows: Vec<Row> = GITHUB_ADDRESSES
+        .iter()
+        .enumerate()
+        .map(|(k, (_, name))| Row::new(l.pick(*name)).trail(Trail::Check(k == s.github)))
+        .collect();
+    let list = widgets::list(&mut c, t, f, top, &rows);
+    let picks = GITHUB_ADDRESSES.iter().enumerate().map(|(k, _)| Action::ChooseGithub(k)).collect::<Vec<_>>();
+    let note = l.pick([
+        "用于 Skyward 更新、资源下载等需要访问 GitHub 的功能。镜像会读取相同资源页和文件，SHA-256 校验仍会执行。",
+        "用於 Skyward 更新、資源下載等需要存取 GitHub 的功能。鏡像會讀取相同資源頁和檔案，SHA-256 驗證仍會執行。",
+        "Used by Skyward updates, resource downloads and other GitHub features. Mirrors serve the same Resources and files, and SHA-256 is still checked.",
+    ]);
+    let y = widgets::footnote(&mut c, t, f, list.bottom, note);
+    Frame::new(t, fit(c, t, y), hits(&list.rows, &picks), l.pick(GITHUB), top)
 }
 
 /// How long the screen stays on with nothing touched, opened from the
@@ -2207,6 +2237,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
         Row::new(l.pick(LOGS)).icon(ORANGE, Icon::Log),
         Row::new(l.pick(UPDATE)).icon(GREEN, Icon::Layers).trail(Trail::Value(update_value(cx))),
+        Row::new(l.pick(RESOURCES)).icon(ORANGE, Icon::Globe),
     ]);
     let out = hits(&tools.rows, &[
         Action::Open(Screen::Files),
@@ -2215,8 +2246,123 @@ pub fn advanced(cx: &Ctx) -> Frame {
         Action::Open(Screen::Filesystems),
         Action::Open(Screen::Logs),
         Action::Open(Screen::Update),
+        Action::Open(Screen::Resources),
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
+}
+
+/// Files in Skyward's shared GitHub resource release.
+pub fn resources(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let gap = t.m.card_gap;
+    let y = widgets::section_first(&mut c, t, f, top, l.pick(["GitHub 资源", "GitHub 資源", "GitHub resources"]));
+    let mut y = match &s.resources_check {
+        ResourcesCheck::Asking => widgets::list(
+            &mut c,
+            t,
+            f,
+            y,
+            &[Row::new(l.pick(["正在获取资源列表", "正在取得資源清單", "Getting the resource list"])).trail(Trail::None)],
+        )
+        .bottom,
+        ResourcesCheck::Failed(why) => {
+            let mut row = Row::new(l.pick(["重新获取", "重新取得", "Try again"]));
+            if !s.online() {
+                row = row.subtitle(l.pick(WLAN_FIRST));
+            }
+            let check = widgets::list(&mut c, t, f, y, &[row]);
+            out.extend(hits(&check.rows, &[Action::CheckResources]));
+            widgets::footnote(&mut c, t, f, check.bottom, &fmt::unanswered(l, why))
+        }
+        ResourcesCheck::Answered(builds) => {
+            let y = if let Some(job) = &s.resource_job {
+                match (&job.outcome, job.progress) {
+                    (None, progress) => {
+                        let (heading, detail, share) = match progress {
+                            None => (l.pick(GETTING_READY), String::new(), None),
+                            Some(progress) => downloaded(l, progress, job.rate),
+                        };
+                        let y = widgets::progress_card(&mut c, t, f, y, heading, &detail, share);
+                        let stop = widgets::list(
+                            &mut c,
+                            t,
+                            f,
+                            y + gap,
+                            &[Row::new(l.pick(if job.stopping { STOPPING } else { STOP })).trail(Trail::None)],
+                        );
+                        if !job.stopping {
+                            out.extend(hits(&stop.rows, &[Action::StopResource]));
+                        }
+                        return Frame::new(t, fit(c, t, stop.bottom), out, l.pick(RESOURCES), top);
+                    }
+                    (Some(DownloadEnd::Downloaded), _) => {
+                        let name = &job.build.name;
+                        let detail = l.pick(["已下载并通过 SHA-256 校验", "已下載並通過 SHA-256 驗證", "Downloaded and verified with SHA-256"]);
+                        let y = widgets::list(&mut c, t, f, y, &[standing(name, GREEN, Icon::Install, detail)]).bottom;
+                        let row = Row::new(l.pick(["用安装器打开", "用安裝器開啟", "Open with the installer"])).subtitle(l.pick([
+                            "由 Skyward 按文件内容判断能否安装",
+                            "由 Skyward 按檔案內容判斷能否安裝",
+                            "Skyward decides from the file contents whether it can install it",
+                        ]));
+                        let install = widgets::list(&mut c, t, f, y + gap, &[row]);
+                        out.extend(hits(&install.rows, &[Action::OpenResource]));
+                        install.bottom
+                    }
+                    (Some(DownloadEnd::Stopped), _) => widgets::footnote(&mut c, t, f, y, l.pick(["已暂停下载。", "已暫停下載。", "Download paused."])),
+                    (Some(DownloadEnd::Failed(why)), _) => widgets::footnote(&mut c, t, f, y, &fmt::download_failure(l, why)),
+                }
+            } else {
+                y
+            };
+            let sizes: Vec<String> = builds
+                .iter()
+                .map(|build| {
+                    if build.size == 0 {
+                        l.pick(["未知", "未知", "Unknown"]).to_string()
+                    } else {
+                        fmt::file_size(build.size)
+                    }
+                })
+                .collect();
+            let subtitles: Vec<String> = builds
+                .iter()
+                .zip(&sizes)
+                .map(|(build, size)| format!("{size:<12}   {}", build.sha256))
+                .collect();
+            let rows: Vec<Row> = builds
+                .iter()
+                .zip(&subtitles)
+                .map(|(build, subtitle)| Row::new(&build.name).icon(ORANGE, Icon::Folder).subtitle_nowrap(subtitle).trail(Trail::None))
+                .collect();
+            let choice = widgets::list(&mut c, t, f, y + gap, &rows);
+            out.extend(hits(&choice.rows, &(0..builds.len()).map(Action::DownloadResource).collect::<Vec<_>>()));
+            choice.bottom
+        }
+        ResourcesCheck::Idle => {
+            let row = widgets::list(
+                &mut c,
+                t,
+                f,
+                y,
+                &[Row::new(l.pick(["连接 WLAN 后获取资源列表", "連接 Wi-Fi 後取得資源清單", "Connect to Wi-Fi to get the resource list"])).trail(Trail::None)],
+            );
+            out.extend(hits(&row.rows, &[Action::CheckResources]));
+            row.bottom
+        }
+    };
+    let folder = widgets::list(
+        &mut c,
+        t,
+        f,
+        y + gap,
+        &[Row::new(l.pick(["打开下载文件夹", "開啟下載資料夾", "Open download folder"])).icon(BLUE, Icon::Folder)],
+    );
+    out.extend(hits(&folder.rows, &[Action::OpenResourceFolder]));
+    y = folder.bottom;
+    Frame::new(t, fit(c, t, y), out, l.pick(RESOURCES), top)
 }
 
 const RELABEL: Text = ["修复 SELinux 上下文", "修復 SELinux 上下文", "Fix SELinux contexts"];
