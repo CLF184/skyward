@@ -1,35 +1,177 @@
 name: Build
 
-# Every push is linted and tested and builds a zipped recovery for piano.
-# A tag starting with v publishes the zip as a release. A manual run can
-# select another device from devices/.
+# Pushing a branch tests it and builds its devices. A `v*` tag publishes them.
+# A manual run can release several branches at once. Each branch may name its
+# devices in `.github/build-devices`; without that file, every configuration
+# under `devices/` is built.
 on:
   push:
     branches: ["**"]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      device:
-        description: Device codename (defaults to piano)
+      releases:
+        description: >-
+          JSON releases, for example
+          [{"branch":"haotian-rinrroy-features","tag":"v0.2.0-haotian","devices":["haotian"]},
+          {"branch":"main","tag":"v0.2.0-piano","devices":["piano"]}].
         required: false
+        type: string
         default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type != 'tag' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Lint and test
+  plan:
+    name: Plan branches and devices
     runs-on: ubuntu-24.04
+    outputs:
+      releases: ${{ steps.plan.outputs.releases }}
+      publish: ${{ steps.plan.outputs.publish }}
+      builds: ${{ steps.plan.outputs.builds }}
+      has_releases: ${{ steps.plan.outputs.has_releases }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Resolve every branch and device
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SHA: ${{ github.sha }}
+          RELEASES: ${{ inputs.releases }}
+        run: |
+          set -euo pipefail
+          entries=$(mktemp)
+
+          if [ "$EVENT" = workflow_dispatch ]; then
+            if [ -z "$RELEASES" ]; then
+              echo "No releases were given" >&2
+              exit 1
+            fi
+            printf '%s' "$RELEASES" > "$entries"
+          elif [ "$REF_TYPE" = tag ]; then
+            jq -n --arg branch "tag:$REF_NAME" --arg tag "$REF_NAME" \
+              '[{branch:$branch, tag:$tag}]' > "$entries"
+          else
+            jq -n --arg branch "$REF_NAME" \
+              '[{branch:$branch, tag:""}]' > "$entries"
+          fi
+
+          jq -e '
+            type == "array" and length > 0 and
+            all(.[];
+              type == "object" and
+              (.branch | type == "string" and length > 0) and
+              ((.tag // "") | type == "string") and
+              ((.devices // []) |
+                type == "array" and all(.[]; type == "string" and length > 0))
+            ) and
+            (([.[].branch] | length) ==
+             ([.[].branch] | unique | length)) and
+            (([.[] | (.tag // "") | select(length > 0)] | length) ==
+             ([.[] | (.tag // "") | select(length > 0)] | unique | length))
+          ' \
+            "$entries" >/dev/null
+
+          releases='[]'
+          publish='[]'
+          builds='[]'
+          while IFS=$'\t' read -r branch tag requested; do
+            if [ -n "$tag" ] && ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "Release tags must look like v1.2.3 or v1.2.3-haotian: $tag" >&2
+              exit 1
+            fi
+
+            if [ "$EVENT" = workflow_dispatch ]; then
+              if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+                echo "Invalid branch name: $branch" >&2
+                exit 1
+              fi
+              git fetch --no-tags --depth=1 origin "refs/heads/$branch:refs/remotes/origin/$branch"
+              sha=$(git rev-parse "refs/remotes/origin/$branch")
+            else
+              sha=$SHA
+            fi
+            branch_name=$(printf '%s' "$branch" | sed 's#[^A-Za-z0-9_.-]#-#g')
+            branch_hash=$(printf '%s' "$branch" | sha256sum | cut -c1-7)
+            safe="$branch_name-${sha:0:7}-$branch_hash"
+
+            devices=()
+            if [ -n "$requested" ]; then
+              IFS=',' read -r -a devices <<< "$requested"
+            elif git cat-file -e "$sha:.github/build-devices" 2>/dev/null; then
+              mapfile -t devices < <(
+                git show "$sha:.github/build-devices" |
+                  sed 's/#.*//' |
+                  tr -d '\r' |
+                  awk 'NF { print $1 }'
+              )
+            else
+              mapfile -t devices < <(
+                git ls-tree --name-only "$sha:devices" |
+                  sed -n 's/\.toml$//p' |
+                  sort
+              )
+            fi
+            test "${#devices[@]}" -gt 0
+
+            releases=$(jq -c --argjson release "$(
+              jq -nc --arg branch "$branch" --arg tag "$tag" --arg sha "$sha" --arg safe "$safe" \
+                '{branch:$branch, tag:$tag, sha:$sha, safe:$safe}'
+            )" '. + [$release]' <<< "$releases")
+            if [ -n "$tag" ]; then
+              publish=$(jq -c --argjson release "$(
+                jq -nc --arg branch "$branch" --arg tag "$tag" --arg sha "$sha" --arg safe "$safe" \
+                  '{branch:$branch, tag:$tag, sha:$sha, safe:$safe}'
+              )" '. + [$release]' <<< "$publish")
+            fi
+
+            for device in "${devices[@]}"; do
+              if ! [[ "$device" =~ ^[A-Za-z0-9._-]+$ ]]; then
+                echo "Invalid device codename: $device" >&2
+                exit 1
+              fi
+              git cat-file -e "$sha:devices/$device.toml"
+              builds=$(jq -c --argjson build "$(
+                jq -nc --arg branch "$branch" --arg tag "$tag" --arg sha "$sha" \
+                  --arg safe "$safe" --arg device "$device" \
+                  '{branch:$branch, tag:$tag, sha:$sha, safe:$safe, device:$device}'
+              )" '. + [$build]' <<< "$builds")
+            done
+          done < <(jq -r '.[] | [.branch, (.tag // ""), ((.devices // []) | join(","))] | @tsv' "$entries")
+
+          echo "releases=$(jq -c . <<< "$releases")" >> "$GITHUB_OUTPUT"
+          echo "publish=$(jq -c . <<< "$publish")" >> "$GITHUB_OUTPUT"
+          echo "builds=$(jq -c . <<< "$builds")" >> "$GITHUB_OUTPUT"
+          if jq -e 'length > 0' <<< "$publish" >/dev/null; then
+            echo "has_releases=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_releases=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  check:
+    name: Lint and test ${{ matrix.release.branch }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.plan.outputs.releases) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.release.sha }}
       - uses: ./.github/actions/setup
       - name: Lint what runs on the computer
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -39,15 +181,24 @@ jobs:
         run: cargo ndk -t arm64-v8a --platform 30 clippy --locked -p skyward -p skyward-install -p skyward-systems -p skyward-system-init -- -D warnings
 
   tools:
-    name: Build the recovery service and the packer
+    name: Tools for ${{ matrix.release.branch }}
+    needs: plan
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.plan.outputs.releases) }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.release.sha }}
       - uses: ./.github/actions/setup
       - name: Build the recovery service for the phone
+        env:
+          RELEASE_TAG: ${{ matrix.release.tag }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            export SKYWARD_VERSION="${GITHUB_REF_NAME#v}"
+          if [ -n "$RELEASE_TAG" ]; then
+            export SKYWARD_VERSION="${RELEASE_TAG#v}"
           fi
           cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
       # It runs as a second system's first program, before any library is
@@ -69,48 +220,32 @@ jobs:
           cp target/system-init/aarch64-linux-android/release/system-init tools/
       - uses: actions/upload-artifact@v7
         with:
-          name: tools
+          name: tools-${{ matrix.release.safe }}
           path: tools/
           if-no-files-found: error
           retention-days: 1
 
-  devices:
-    name: List the devices
-    runs-on: ubuntu-24.04
-    outputs:
-      devices: ${{ steps.list.outputs.devices }}
-    steps:
-      - uses: actions/checkout@v7
-      - id: list
-        env:
-          DEVICE: ${{ inputs.device }}
-        run: |
-          if [ -n "$DEVICE" ]; then
-            test -f "devices/$DEVICE.toml"
-            echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
-          else
-            echo 'devices=["piano"]' >> "$GITHUB_OUTPUT"
-          fi
-
   recovery:
-    name: Recovery for ${{ matrix.device }}
-    needs: [tools, devices]
+    name: ${{ matrix.build.branch }} / ${{ matrix.build.device }}
+    needs: [tools, plan]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        device: ${{ fromJSON(needs.devices.outputs.devices) }}
+        build: ${{ fromJSON(needs.plan.outputs.builds) }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.build.sha }}
       - uses: actions/download-artifact@v8
         with:
-          name: tools
+          name: tools-${{ matrix.build.safe }}
           path: tools
       - name: Make the tools runnable
         run: chmod +x tools/skyward tools/skyward-pack
       - name: Read the stock build the recovery is made on
         id: stock
-        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"
+        run: tools/skyward-pack stock --config "devices/${{ matrix.build.device }}.toml" >> "$GITHUB_OUTPUT"
       - name: Restore the stock recovery
         id: cache
         uses: actions/cache@v6
@@ -121,7 +256,7 @@ jobs:
       # which is several gigabytes in all.
       - name: Take the recovery partition out of the stock package
         if: steps.cache.outputs.cache-hit != 'true'
-        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
+        run: tools/skyward-pack stock --config "devices/${{ matrix.build.device }}.toml" --out stock/recovery.img
       - name: Check the stock recovery
         env:
           RECOVERY: ${{ steps.stock.outputs.recovery }}
@@ -129,10 +264,12 @@ jobs:
       - name: Pack the recovery
         id: pack
         env:
-          DEVICE: ${{ matrix.device }}
+          DEVICE: ${{ matrix.build.device }}
+          RELEASE_TAG: ${{ matrix.build.tag }}
+          SHA: ${{ matrix.build.sha }}
           STOCK: ${{ steps.stock.outputs.version }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
+          if [ -n "$RELEASE_TAG" ]; then version="$RELEASE_TAG"; else version="${SHA::7}"; fi
           name="skyward-$version-$DEVICE-$STOCK"
           mkdir out
           tools/skyward-pack recovery --stock stock/recovery.img --binary tools/skyward --system-init tools/system-init \
@@ -146,53 +283,74 @@ jobs:
         env:
           NAME: ${{ steps.pack.outputs.name }}
         run: zip -9 "$NAME.zip" "$NAME.img"
-      # The artifact takes the zip's name.
+      # Keep every branch's artifacts apart in the same run.
       - uses: actions/upload-artifact@v7
         with:
+          name: skyward-${{ matrix.build.safe }}-${{ matrix.build.device }}
           path: out/${{ steps.pack.outputs.name }}.zip
           archive: false
           if-no-files-found: error
           retention-days: 7
 
   release:
-    name: Publish the release
-    if: github.ref_type == 'tag'
-    needs: [check, devices, recovery]
+    name: Release ${{ matrix.release.tag }} from ${{ matrix.release.branch }}
+    if: needs.plan.outputs.has_releases == 'true'
+    needs: [check, tools, recovery, plan]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.plan.outputs.publish) }}
     steps:
       # The devices' configurations say which phone each zip is for.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.release.sha }}
       # Each artifact is a zip, which the download keeps whole under its
       # name, as it is handed out.
       - uses: actions/download-artifact@v8
         with:
-          pattern: skyward-*
+          pattern: skyward-${{ matrix.release.safe }}-*
           path: images
           merge-multiple: true
           skip-decompress: true
       - name: Sum the zips
         working-directory: images
-        run: sha256sum -- *.zip > SHA256SUMS
-      # Each zip shows on the release as the phone it is for, its model and
-      # then its codename, which is how people look for theirs; a device
-      # whose zip is missing stops the release.
-      - name: Publish the release
+        env:
+          TAG: ${{ matrix.release.tag }}
+        run: sha256sum -- skyward-"$TAG"-*.zip > SHA256SUMS
+      - name: Publish this branch's release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          DEVICES: ${{ needs.devices.outputs.devices }}
+          TAG: ${{ matrix.release.tag }}
+          SHA: ${{ matrix.release.sha }}
         run: |
+          shopt -s nullglob
           zips=()
-          for device in $(jq -r '.[]' <<< "$DEVICES"); do
-            config="devices/$device.toml"
+          for config in devices/*.toml; do
+            device=$(basename "$config" .toml)
+            files=(images/skyward-"$TAG"-"$device"-*.zip)
+            if [ "${#files[@]}" -eq 0 ]; then continue; fi
             model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["device"]["model"])' "$config")
-            zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
-            zips+=("$zip#$model ($device)")
+            zips+=("${files[0]}#$model ($device)")
           done
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" --clobber "${zips[@]}" images/SHA256SUMS
+          test "${#zips[@]}" -gt 0
+          tag_sha=$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk 'NR == 1 { print $1 }')
+          if [ -z "$tag_sha" ]; then
+            tag_sha=$(git ls-remote --tags origin "refs/tags/$TAG" | awk 'NR == 1 { print $1 }')
+          fi
+          if [ -n "$tag_sha" ] && [ "$tag_sha" != "$SHA" ]; then
+            echo "Tag $TAG points to $tag_sha, not to $SHA" >&2
+            exit 1
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "${zips[@]}" images/SHA256SUMS
+          elif [ -n "$tag_sha" ]; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes "${zips[@]}" images/SHA256SUMS
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${zips[@]}" images/SHA256SUMS
+            gh release create "$TAG" --target "$SHA" --title "$TAG" --generate-notes "${zips[@]}" images/SHA256SUMS
           fi
