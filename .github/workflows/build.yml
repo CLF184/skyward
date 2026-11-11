@@ -312,7 +312,7 @@ jobs:
       # name, as it is handed out.
       - uses: actions/download-artifact@v8
         with:
-          pattern: skyward-${{ matrix.release.safe }}-*
+          pattern: skyward-${{ matrix.release.tag }}-*
           path: images
           merge-multiple: true
           skip-decompress: true
