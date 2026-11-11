@@ -67,7 +67,11 @@ jobs:
       # packer, which runs here and puts the service into the stock image.
       # The setup action left ANDROID_NDK_HOME set for cargo-ndk.
       - name: Build the recovery service for the phone
-        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            export SKYWARD_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
 
       # It runs as a second system's first program, before any library is
       # there to load, so it is linked statically and packed with the image.

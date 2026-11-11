@@ -10,12 +10,16 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::str::FromStr;
 
-/// Version of this build, shown on the About page.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version of this build, shown on the About page. Release builds take it
+/// from the tag; other builds use the workspace's default version.
+pub const VERSION: &str = match option_env!("SKYWARD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 /// Who made this build, shown beside its version on the About page's list of
 /// everything the recovery can read.
-pub const BUILT_BY: &str = "澪洛依";
+pub const BUILT_BY: &str = "澪洛依 & CLF184";
 
 const CPU: &str = "/sys/devices/system/cpu";
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
