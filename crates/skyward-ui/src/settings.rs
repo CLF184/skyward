@@ -5,10 +5,11 @@
 //! a time zone, a part or a place by its name, so a later version that lists
 //! them otherwise reads them the same.
 
-use crate::app::{Place, State, GITHUB_ADDRESSES, SCREEN_OFF, TIME_ZONES};
+use crate::app::{Place, SavedWlan, Secret, State, GITHUB_ADDRESSES, SCREEN_OFF, TIME_ZONES};
 use crate::Lang;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use skyward_net::supplicant::Security;
 
 /// How long settings stand unchanged before they are written, so a slider
 /// dragged across the page is written once, after the hand stops.
@@ -46,6 +47,8 @@ pub struct Settings {
     pub time_zone: String,
     /// The GitHub address, by its name.
     pub github: String,
+    /// The last network joined, whose password is kept.
+    pub wifi: Option<Wifi>,
     pub vibrate: bool,
     /// The vibration slider's place, from 0 at its left end to 1.
     pub vibration: f32,
@@ -105,6 +108,27 @@ pub struct Logs {
     pub to: String,
 }
 
+/// The last network joined.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wifi {
+    pub ssid: Vec<u8>,
+    pub name: String,
+    /// How it is protected, by name.
+    pub security: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for Wifi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wifi")
+            .field("ssid", &self.ssid)
+            .field("name", &self.name)
+            .field("security", &self.security)
+            .field("password", &format!("{} characters", self.password.chars().count()))
+            .finish()
+    }
+}
+
 impl Default for Settings {
     /// The settings a recovery starts with.
     fn default() -> Self {
@@ -141,6 +165,12 @@ impl Settings {
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
             github: GITHUB_ADDRESSES[state.github].0.to_string(),
+            wifi: state.saved_wlan.as_ref().map(|wifi| Wifi {
+                ssid: wifi.ssid.clone(),
+                name: wifi.name.clone(),
+                security: security_key(wifi.security).to_string(),
+                password: wifi.password.0.clone(),
+            }),
             vibrate: state.vibrate,
             vibration: state.vibration,
             file_transfer: state.file_transfer,
@@ -204,6 +234,16 @@ impl Settings {
         if let Some(at) = GITHUB_ADDRESSES.iter().position(|(key, _)| *key == self.github) {
             state.github = at;
         }
+        if let Some(wifi) = &self.wifi {
+            if let Some(security) = security_from_key(&wifi.security) {
+                state.saved_wlan = Some(SavedWlan {
+                    ssid: wifi.ssid.clone(),
+                    name: wifi.name.clone(),
+                    security,
+                    password: Secret(wifi.password.clone()),
+                });
+            }
+        }
         state.vibrate = self.vibrate;
         if (0.0..=1.0).contains(&self.vibration) {
             state.vibration = self.vibration;
@@ -240,13 +280,38 @@ fn picked<const N: usize>(kept: &[String], all: &[&str; N]) -> [bool; N] {
     all.map(|name| kept.iter().any(|k| k == name))
 }
 
+fn security_key(security: Security) -> &'static str {
+    match security {
+        Security::Open => "open",
+        Security::Owe => "owe",
+        Security::Wep => "wep",
+        Security::Psk => "psk",
+        Security::Sae => "sae",
+        Security::PskSae => "psk_sae",
+        Security::Enterprise => "enterprise",
+    }
+}
+
+fn security_from_key(key: &str) -> Option<Security> {
+    match key {
+        "open" => Some(Security::Open),
+        "owe" => Some(Security::Owe),
+        "wep" => Some(Security::Wep),
+        "psk" => Some(Security::Psk),
+        "sae" => Some(Security::Sae),
+        "psk_sae" => Some(Security::PskSae),
+        "enterprise" => Some(Security::Enterprise),
+        _ => None,
+    }
+}
+
 /// What the settings file held as the recovery started.
 #[derive(Debug, Clone, PartialEq)]
 // The settings are read once at the start and stay as one value for the whole
 // recovery, so boxing the big variant would buy nothing.
 #[allow(clippy::large_enum_variant)]
 pub enum Kept {
-    Settings(Box<Settings>),
+    Settings(Settings),
     /// No settings: no file, or one that does not read as settings.
     Nothing,
     /// Where the file is could not be read; it is left alone this time.
@@ -278,7 +343,7 @@ pub struct Keeper {
 impl Keeper {
     pub fn new(kept: &Kept) -> Keeper {
         let holds = match kept {
-            Kept::Settings(settings) => Some(Some((**settings).clone())),
+            Kept::Settings(settings) => Some(Some(settings.clone())),
             Kept::Nothing => Some(None),
             Kept::Unreadable => None,
         };
@@ -373,6 +438,12 @@ mod tests {
             verify: false,
             logs: [false, true],
             logs_to: 1,
+            saved_wlan: Some(SavedWlan {
+                ssid: b"Skyward".to_vec(),
+                name: "Skyward".into(),
+                security: Security::Psk,
+                password: Secret("secret12".into()),
+            }),
             ..State::default()
         };
         let kept = Settings::read(&Settings::of(&state).text()).unwrap();
@@ -389,6 +460,7 @@ mod tests {
         // wake — both cost power, so both are asked for.
         assert!(!State::default().always_on, "the face on a dark panel is off until it is turned on");
         assert!(!State::default().double_tap, "the two-tap wake is off until it is turned on");
+        assert_eq!(back.saved_wlan, state.saved_wlan);
     }
 
     #[test]
@@ -443,7 +515,7 @@ mod tests {
 
     #[test]
     fn changed_settings_are_written_once_they_have_stood_for_a_moment() {
-        let mut keeper = Keeper::new(&Kept::Settings(Box::default()));
+        let mut keeper = Keeper::new(&Kept::Settings(Settings::default()));
         assert_eq!(keeper.due(Settings::default(), 0), None, "what the file holds is not written again");
         let dark = Settings { dark: true, ..Settings::default() };
         assert_eq!(keeper.due(dark.clone(), 1_000), None);
