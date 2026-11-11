@@ -5,7 +5,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 
 /// Where GitHub answers which release of Skyward is the newest.
-pub const LATEST: &str = "https://api.github.com/repos/kirklin/skyward/releases/latest";
+pub const LATEST: &str = "https://api.github.com/repos/CLF184/skyward/releases/latest";
 
 /// The release whose Resources hold files shared by Skyward builds.
 pub const RESOURCE: &str = "https://github.com/CLF184/skyward/releases/tag/resource";
