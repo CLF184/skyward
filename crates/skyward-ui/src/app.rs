@@ -313,6 +313,15 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// The last network whose password was accepted, kept between starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedWlan {
+    pub ssid: Vec<u8>,
+    pub name: String,
+    pub security: Security,
+    pub password: Secret,
+}
+
 /// A network being added by hand, as its page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Adding {
@@ -1784,6 +1793,10 @@ pub struct State {
     /// The WLAN, as the runtime last told it; none on a phone whose WLAN the
     /// recovery does not bring up.
     pub wlan: Option<Wlan>,
+    /// The last network joined, whose password is kept between starts.
+    pub saved_wlan: Option<SavedWlan>,
+    /// The credentials being tried, until the network accepts them.
+    pub wlan_attempt: Option<SavedWlan>,
     /// The network the password page is for, and what is typed there.
     pub joining: Option<Network>,
     /// The network the details page is of, as it was found.
@@ -1884,6 +1897,8 @@ impl Default for State {
             part_work: None,
             update: Standing::None,
             wlan: None,
+            saved_wlan: None,
+            wlan_attempt: None,
             joining: None,
             details: None,
             adding: None,
@@ -3675,6 +3690,19 @@ impl App {
         if self.state.wlan.as_ref() == Some(&w) {
             return;
         }
+        if let Some(Joined { ssid, stage: Joining::Connected(_), .. }) = &w.joined {
+            if let Some(saved) = self.state.wlan_attempt.as_ref().filter(|saved| saved.ssid == *ssid).cloned() {
+                self.state.saved_wlan = Some(saved);
+                self.state.wlan_attempt = None;
+            }
+        } else if w
+            .joined
+            .as_ref()
+            .is_some_and(|joined| matches!(&joined.stage, Joining::WrongPassword | Joining::Failed))
+            && self.state.wlan_attempt.is_some()
+        {
+            self.state.wlan_attempt = None;
+        }
         self.state.wlan = Some(w);
         if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork | Screen::Update | Screen::SkywardUpdate) {
             self.refresh();
@@ -3819,13 +3847,20 @@ impl App {
         self.refresh();
     }
 
-    /// Open the password page for `network`, empty.
+    /// Open the password page for `network`, with the password last accepted
+    /// by that network when there is one.
     fn ask_password(&mut self, network: Network) {
+        let saved = self.state.saved_wlan.as_ref().filter(|saved| saved.ssid == network.ssid);
+        self.state.password = saved.map_or_else(String::new, |saved| saved.password.0.clone());
         self.state.joining = Some(network);
-        self.state.password.clear();
         self.state.show_password = false;
         self.state.layer = Layer::Letters;
         self.open(Screen::WlanPassword);
+    }
+
+    fn join_wlan(&mut self, ssid: Vec<u8>, name: String, security: Security, password: Secret) -> Effect {
+        self.state.wlan_attempt = Some(SavedWlan { ssid: ssid.clone(), name: name.clone(), security, password: password.clone() });
+        Effect::JoinWlan { ssid, name, security, password }
     }
 
     /// How renaming the entry the file page shows went: done, the folder
@@ -5294,7 +5329,13 @@ impl App {
                 let on = matches!(w.power, Power::Off | Power::Failed(_));
                 *w = Wlan { power: if on { Power::Starting } else { Power::Off }, ..Wlan::default() };
                 self.refresh();
-                return vec![Effect::Wlan(on)];
+                let mut fx = vec![Effect::Wlan(on)];
+                if on {
+                    if let Some(saved) = self.state.saved_wlan.clone() {
+                        fx.push(self.join_wlan(saved.ssid, saved.name, saved.security, saved.password));
+                    }
+                }
+                return fx;
             }
             Action::Toggle(switch) => {
                 let on = match switch {
@@ -5654,12 +5695,8 @@ impl App {
                     }
                     s if s.password() => self.ask_password(network),
                     _ => {
-                        return vec![Effect::JoinWlan {
-                            ssid: network.ssid,
-                            name: network.name,
-                            security: network.security,
-                            password: Secret::default(),
-                        }]
+                        let effect = self.join_wlan(network.ssid, network.name, network.security, Secret::default());
+                        return vec![effect];
                     }
                 }
             }
@@ -5692,6 +5729,8 @@ impl App {
             Action::LeaveNetwork => {
                 let mut fx = self.back(now);
                 fx.push(Effect::LeaveWlan);
+                self.state.saved_wlan = None;
+                self.state.wlan_attempt = None;
                 return fx;
             }
             Action::Rescan => return vec![Effect::ScanWlan],
@@ -6089,7 +6128,8 @@ impl App {
                         None => {
                             let password = Secret(std::mem::take(&mut self.state.password));
                             let mut fx = self.back(now);
-                            fx.push(Effect::JoinWlan { ssid: network.ssid, name: network.name, security: network.security, password });
+                            let effect = self.join_wlan(network.ssid, network.name, network.security, password);
+                            fx.push(effect);
                             return fx;
                         }
                     }
@@ -6122,7 +6162,8 @@ impl App {
                                 false => Secret::default(),
                             };
                             let mut fx = self.back(now);
-                            fx.push(Effect::JoinWlan { ssid: name.clone().into_bytes(), name, security, password });
+                            let effect = self.join_wlan(name.clone().into_bytes(), name, security, password);
+                            fx.push(effect);
                             return fx;
                         }
                     }
@@ -10842,13 +10883,42 @@ mod tests {
         assert_eq!(app.screen(), Screen::Wlan, "the WLAN page shows how joining goes");
         assert_eq!((app.state.password.as_str(), app.state.joining.as_ref()), ("", None), "the password is not kept");
         app.set_wlan(connected("Skyward"));
+        assert_eq!(app.state.saved_wlan.as_ref().map(|saved| saved.password.0.as_str()), Some("secret12"));
         assert_eq!(fmt::wlan_value(Lang::Hans, app.state.wlan.as_ref().unwrap()), "Skyward");
         tap(&mut app, &f, &i, Action::OpenJoined);
         assert_eq!(app.screen(), Screen::WlanNetwork);
         assert_eq!(tap(&mut app, &f, &i, Action::LeaveNetwork), vec![Effect::LeaveWlan]);
+        assert_eq!(app.state.saved_wlan, None, "leaving a network forgets it");
         assert_eq!(app.screen(), Screen::Wlan);
         assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(false)]);
         assert_eq!(app.state.wlan, Some(Wlan::default()));
+    }
+
+    #[test]
+    fn the_last_network_is_joined_again_when_the_wlan_comes_on() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Wlan, W, H, PPD);
+        app.state.wlan = Some(Wlan::default());
+        app.state.saved_wlan = Some(SavedWlan {
+            ssid: b"Skyward".to_vec(),
+            name: "Skyward".into(),
+            security: Security::Psk,
+            password: Secret("secret12".into()),
+        });
+        app.refresh();
+        assert_eq!(
+            tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)),
+            [
+                Effect::Wlan(true),
+                Effect::JoinWlan {
+                    ssid: b"Skyward".to_vec(),
+                    name: "Skyward".into(),
+                    security: Security::Psk,
+                    password: Secret("secret12".into()),
+                }
+            ]
+        );
+        assert_eq!(app.state.wlan_attempt.as_ref().map(|saved| saved.name.as_str()), Some("Skyward"));
     }
 
     #[test]
